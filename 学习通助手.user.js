@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.7.0
+// @version      0.7.1
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -467,9 +467,34 @@
 
     // 1) 周期检查目录完成标记(权威依据)
     setInterval(() => tryAdvance('poll'), 4000);
-    // 2) 任务帧 done 事件(视频播完等,加速推进)
+    // 2) 章内任务点切换:任务帧完成 -> 点击下一个任务标签(视频 -> 章节测验…)
+    let taskSwitching = false;
+    const tryNextTask = () => {
+      if (taskSwitching || !isEnabled()) return;
+      const $tabs = $('li[onclick*="changeDisplayContent"]');
+      if ($tabs.length < 2) return; // 单任务章节,交给整章推进
+      const cur = $tabs.index($tabs.filter('.active').get(0));
+      const $next = $tabs.eq(cur + 1);
+      if (!$next.length) return;    // 已是最后一个任务,交给整章推进
+      taskSwitching = true;
+      setTimeout(() => {
+        try {
+          $next.get(0).click();
+          const title = $next.text().replace(/\s+/g, ' ').trim();
+          log.info('advance', '切换到本章下一任务: ' + title);
+          report('advance', 'next-task', title);
+        } catch (e) {
+          log.error('advance', '任务切换失败: ' + e.message);
+        } finally {
+          setTimeout(() => { taskSwitching = false; }, 6000);
+        }
+      }, 1500 + Math.round(Math.random() * 1500));
+    };
+    // 3) 任务帧事件:knowledge 帧的完成标记(权威) / 视频 ended(兜底)
     GM_addValueChangeListener(STATUS_KEY, (_k, _o, nv, remote) => {
-      if (remote && nv && nv.state === 'done') tryAdvance('done-event');
+      if (!remote || !nv) return;
+      if (nv.state === 'job-done' || nv.state === 'done') tryNextTask();
+      if (nv.state === 'done') tryAdvance('done-event');
     });
   }
 
@@ -775,12 +800,60 @@
     }
   }
 
+  /* ============================== 通用:反后台节流 ========================= */
+  // 1) 伪装页面可见性:学习通在 visibilitychange 时会暂停视频/停止接收进度,
+  //    劫持 hidden/visibilityState 并阻断事件,让页面以为标签始终在前台
+  function spoofVisibility() {
+    try {
+      Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+      Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+      const block = (e) => { e.stopImmediatePropagation(); };
+      document.addEventListener('visibilitychange', block, true);
+      window.addEventListener('visibilitychange', block, true);
+    } catch (e) {
+      log.warn('antithrottle', '可见性伪装失败: ' + e.message);
+    }
+  }
+  // 2) Web Worker 心跳:Chrome 后台标签把 window 定时器节流到最狠 1 分钟一次,
+  //    Worker 定时器不受此限。CSP 可能拦截 blob worker,失败退回普通定时器。
+  function startHeartbeat(cb, ms) {
+    try {
+      const blob = new Blob([`setInterval(()=>postMessage(1),${ms})`], { type: 'application/javascript' });
+      const worker = new Worker(URL.createObjectURL(blob));
+      worker.onmessage = cb;
+      return () => worker.terminate();
+    } catch (e) {
+      log.warn('antithrottle', 'Worker 心跳不可用(CSP?),退回普通定时器: ' + e.message);
+      const t = setInterval(cb, ms);
+      return () => clearInterval(t);
+    }
+  }
+
+  /* ============================== knowledge-frame ========================= */
+  // 任务点容器帧:轮询 .ans-job-finished(权威完成标记),上报给顶层切换任务
+  function initKnowledgeFrame() {
+    const module = 'knowledge';
+    spoofVisibility();
+    let reported = false;
+    const check = () => {
+      if (reported) return;
+      if (document.querySelector('.ans-job-finished')) {
+        reported = true;
+        log.info(module, '检测到任务点完成标记(.ans-job-finished)');
+        report(module, 'job-done', '当前任务点已完成');
+      }
+    };
+    setInterval(check, 3000);
+    setTimeout(check, 1500);
+  }
+
 
   // 页面真实播放 + 倍速 + 静音;弹题随机作答;风控验证暂停等人工;完成检测上报
   function initVideoFrame() {
     const module = 'video';
     report(module, 'start', '视频任务启动');
     log.info(module, '视频任务启动');
+    spoofVisibility(); // 防止后台标签被暂停/停收进度
     let done = false;
     let riskPaused = false;
     onJobDone(module, () => { done = true; });
@@ -851,7 +924,25 @@
         } catch (e) { log.debug(module, '控制异常: ' + e.message); }
       };
       apply();
-      setInterval(apply, 3000);
+      // Worker 心跳驱动控制循环:后台标签不受 window 定时器节流影响
+      startHeartbeat(apply, 3000);
+      // 停滞检测:播放中但进度 15 秒不动,强制恢复(后台暂停/卡顿兜底)
+      let lastT = -1, stallCount = 0;
+      startHeartbeat(() => {
+        if (done || riskPaused || !isEnabled()) return;
+        if (video.paused || video.ended) { lastT = -1; stallCount = 0; return; }
+        if (lastT >= 0 && Math.abs(video.currentTime - lastT) < 0.5) {
+          if (++stallCount >= 3) {
+            stallCount = 0;
+            log.warn(module, '检测到播放停滞,强制恢复');
+            report(module, 'stall', '播放停滞,已强制恢复');
+            video.play().catch(() => {});
+          }
+        } else {
+          stallCount = 0;
+        }
+        lastT = video.currentTime;
+      }, 5000);
 
       // 进度上报(每 30 秒)
       setInterval(() => {
@@ -879,7 +970,7 @@
       initTopAdvance();
       break;
     case 'knowledge':
-      // knowledge 帧仅作容器,任务点完成检测在任务帧自身,这里无需动作
+      initKnowledgeFrame();
       break;
     case 'video':
     case 'audio':
