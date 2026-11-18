@@ -1,8 +1,6 @@
 # AutoCX 学习通自动看课+LLM答题助手
 
-轻量级 ScriptCat 脚本：学习通自动看课（视频/文档课件）+ LLM 辅助章节测验答题。
-
-设计文档：[docs/superpowers/specs/2026-11-18-chaoxing-auto-course-design.md](docs/superpowers/specs/2026-11-18-chaoxing-auto-course-design.md)
+轻量级 ScriptCat 脚本：学习通自动看课（视频/文档课件）+ 自行接入大模型API 辅助章节测验答题, 没有题库
 
 ## 功能
 
