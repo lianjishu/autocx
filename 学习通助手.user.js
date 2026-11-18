@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.8.1
+// @version      0.8.2
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -1121,6 +1121,13 @@
       const block = (e) => { e.stopImmediatePropagation(); };
       document.addEventListener('visibilitychange', block, true);
       window.addEventListener('visibilitychange', block, true);
+      // 防挂机补强:学习通顶层页监听 document mouseout(relatedTarget=null = 鼠标离开视口)
+      // 并跨帧暂停视频。只拦截"离开视口"这一种,页内悬停交互不受影响。
+      const leaveGuard = (e) => {
+        if (!e.relatedTarget) e.stopImmediatePropagation();
+      };
+      document.addEventListener('mouseout', leaveGuard, true);
+      document.addEventListener('mouseleave', leaveGuard, true);
     } catch (e) {
       log.warn('antithrottle', '可见性伪装失败: ' + e.message);
     }
@@ -1282,6 +1289,7 @@
 
   switch (role) {
     case 'top':
+      spoofVisibility(); // 顶层页是 mouseout 防挂机检测所在帧
       initTopPanel();
       initTopAdvance();
       break;
