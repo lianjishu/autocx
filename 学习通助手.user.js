@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.7.1
+// @version      0.7.2
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -59,7 +59,7 @@
       title: '.mark_name, .qyh-tit, .topic-title, .fontLabel, .question-title', // 题干
       optionList: 'ul li, .answerBg, .num_option, .choose-item',          // 选项
       blankInput: 'input[type=text], textarea',                           // 填空输入
-      submit: '.btn-submit, .submitBtn, .jb_btn',                         // 提交按钮(只人工点击)
+      submit: '.btnSubmit, .btn-submit, .submitBtn, .jb_btn, a[onclick*="btnBlueSubmit"], a[onclick*="submit"]', // 提交按钮(自动提交用)
     },
     // 顶层章节页
     top: {
@@ -637,8 +637,15 @@
 
           const btn = $(SELECTORS.quiz.submit).filter(':visible').get(0);
           if (!btn) {
-            log.error(module, '未找到提交按钮,请人工提交');
-            report(module, 'error', '未找到提交按钮');
+            // 区分:已提交过(查看模式) vs 选择器失效
+            const bodyText = document.body.innerText || '';
+            if (/已提交|已完成|查看答案|答案解析|不能再提交|Save & Submit/.test(bodyText) === false && !$('li[onclick*="addChoice"]').length) {
+              log.warn(module, '未找到提交按钮,且无可选题目——可能已提交过,无需操作');
+              report(module, 'submitted', '测验已是完成状态');
+            } else {
+              log.error(module, '未找到提交按钮,请人工提交(选择器可能已改版)');
+              report(module, 'error', '未找到提交按钮,请人工提交');
+            }
             return;
           }
           btn.click();
