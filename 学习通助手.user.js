@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.7.6
+// @version      0.8.0
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -73,6 +73,8 @@
   /* ============================== 配置 ===================================== */
   const DEFAULTS = {
     'autocx.enabled': true, // 总开关(面板启停)
+    'assist.video': true,   // 看课助手(视频/文档任务点)
+    'assist.quiz': true,    // 答题助手(章节测验)
     'llm.base_url': 'https://api.deepseek.com/v1',
     'llm.api_key': '',
     'llm.model': 'deepseek-chat',
@@ -268,55 +270,137 @@
 
   /* ============================== 悬浮面板 ================================= */
   // 仅在 top 帧渲染;通过 GM_addValueChangeListener 聚合各任务帧的日志/状态
+  // 形态:可拖迷你球(进度环+状态点+悬停菜单) <-> 毛玻璃完整面板(助手卡片+三页签)
   function initTopPanel() {
     GM_addStyle(`
       #autocx-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;
-        font:13px/1.5 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif;color:#e8e8e8}
-      #autocx-panel .cx-ball{width:44px;height:44px;border-radius:50%;background:#1677ff;cursor:pointer;
-        display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;
-        box-shadow:0 2px 10px rgba(0,0,0,.35);user-select:none}
-      #autocx-panel .cx-ball.off{background:#999}
-      #autocx-panel .cx-box{display:none;width:380px;max-height:60vh;background:#1f1f1f;border-radius:10px;
-        box-shadow:0 4px 24px rgba(0,0,0,.5);overflow:hidden;flex-direction:column}
+        font:13px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:#1f2937}
+      /* ---------- 迷你球 ---------- */
+      #autocx-panel .cx-ball{position:relative;width:46px;height:46px;cursor:grab;user-select:none}
+      #autocx-panel .cx-ball:active{cursor:grabbing}
+      #autocx-panel .cx-ball svg{position:absolute;inset:0;transform:rotate(-90deg)}
+      #autocx-panel .cx-ball .ring-bg{fill:none;stroke:rgba(59,124,255,.18);stroke-width:3.5}
+      #autocx-panel .cx-ball .ring-fg{fill:none;stroke:#3B7CFF;stroke-width:3.5;stroke-linecap:round;
+        stroke-dasharray:125.6;stroke-dashoffset:125.6;transition:stroke-dashoffset .5s}
+      #autocx-panel .cx-ball .core{position:absolute;inset:4px;border-radius:50%;
+        background:linear-gradient(135deg,#3B7CFF,#60A5FA);display:flex;align-items:center;justify-content:center;
+        color:#fff;font-weight:700;font-size:13px;box-shadow:0 2px 10px rgba(59,124,255,.45)}
+      #autocx-panel .cx-ball.off .core{background:#b9c0cc}
+      #autocx-panel .cx-dots{position:absolute;right:-2px;bottom:-2px;display:flex;gap:3px}
+      #autocx-panel .cx-dots i{width:9px;height:9px;border-radius:50%;border:2px solid #fff;display:block}
+      #autocx-panel .cx-dots .d-v{background:#c8cdd6}
+      #autocx-panel .cx-dots .d-v.on{background:#22C55E}
+      #autocx-panel .cx-dots .d-q{background:#c8cdd6}
+      #autocx-panel .cx-dots .d-q.on{background:#8B5CF6}
+      /* ---------- 悬停快捷菜单 ---------- */
+      #autocx-panel .cx-menu{position:absolute;bottom:56px;right:0;width:172px;background:rgba(255,255,255,.96);
+        backdrop-filter:blur(12px);border-radius:12px;box-shadow:0 6px 24px rgba(31,41,55,.18);
+        padding:6px;display:none;border:1px solid rgba(229,231,235,.8)}
+      #autocx-panel .cx-ball:hover .cx-menu{display:block}
+      #autocx-panel .cx-menu .mi{display:flex;align-items:center;justify-content:space-between;gap:8px;
+        padding:8px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:#1f2937}
+      #autocx-panel .cx-menu .mi:hover{background:#F3F6FB}
+      #autocx-panel .cx-menu .mi .st{font-size:11px;color:#9ca3af}
+      #autocx-panel .cx-menu .mi .st.on{color:#22C55E}
+      /* ---------- 完整面板 ---------- */
+      #autocx-panel .cx-box{display:none;width:392px;max-height:66vh;background:rgba(255,255,255,.94);
+        backdrop-filter:blur(14px);border-radius:14px;box-shadow:0 10px 40px rgba(31,41,55,.22);
+        overflow:hidden;flex-direction:column;border:1px solid rgba(229,231,235,.9)}
       #autocx-panel.open .cx-box{display:flex}
       #autocx-panel.open .cx-ball{display:none}
-      #autocx-panel .cx-head{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#1677ff;color:#fff}
-      #autocx-panel .cx-head b{flex:1;font-size:14px}
-      #autocx-panel .cx-head button{background:none;border:0;color:#fff;cursor:pointer;font-size:14px}
-      #autocx-panel .cx-tabs{display:flex;background:#2a2a2a}
-      #autocx-panel .cx-tabs button{flex:1;padding:6px 0;background:none;border:0;color:#aaa;cursor:pointer}
-      #autocx-panel .cx-tabs button.active{color:#fff;border-bottom:2px solid #1677ff}
-      #autocx-panel .cx-body{padding:8px 12px;overflow-y:auto;min-height:120px}
+      #autocx-panel .cx-head{display:flex;align-items:center;gap:8px;padding:10px 14px;
+        background:linear-gradient(135deg,#3B7CFF,#60A5FA);color:#fff}
+      #autocx-panel .cx-head b{flex:1;font-size:14px;letter-spacing:.5px}
+      #autocx-panel .cx-head button{background:none;border:0;color:#fff;cursor:pointer;font-size:15px;opacity:.9}
+      /* ---------- 助手卡片 ---------- */
+      #autocx-panel .cx-cards{display:flex;gap:10px;padding:12px 14px 4px}
+      #autocx-panel .cx-card{flex:1;border-radius:12px;padding:10px 12px;cursor:pointer;position:relative;
+        background:#EEF1F6;color:#6b7280;transition:transform .12s, box-shadow .12s;border:1px solid transparent}
+      #autocx-panel .cx-card:hover{transform:translateY(-1px)}
+      #autocx-panel .cx-card .t{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px}
+      #autocx-panel .cx-card .s{font-size:11px;margin-top:5px;opacity:.85;display:flex;align-items:center;gap:5px}
+      #autocx-panel .cx-card .s i{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
+      #autocx-panel .cx-card .ck{position:absolute;top:8px;right:10px;width:16px;height:16px;border-radius:50%;
+        border:1.5px solid currentColor;display:flex;align-items:center;justify-content:center;font-size:10px;opacity:.5}
+      #autocx-panel .cx-card.on{color:#fff;border:0;box-shadow:0 4px 14px rgba(59,124,255,.3)}
+      #autocx-panel .cx-card.on .ck{opacity:1;border-color:#fff}
+      #autocx-panel .cx-card.on .ck::after{content:"✓"}
+      #autocx-panel .cx-card.video.on{background:linear-gradient(135deg,#3B7CFF,#60A5FA)}
+      #autocx-panel .cx-card.quiz.on{background:linear-gradient(135deg,#8B5CF6,#A78BFA);box-shadow:0 4px 14px rgba(139,92,246,.3)}
+      /* ---------- 页签 ---------- */
+      #autocx-panel .cx-tabs{display:flex;padding:8px 14px 0;gap:4px}
+      #autocx-panel .cx-tabs button{flex:1;padding:6px 0;background:none;border:0;color:#6b7280;cursor:pointer;
+        font-size:13px;border-bottom:2px solid transparent}
+      #autocx-panel .cx-tabs button.active{color:#3B7CFF;border-bottom-color:#3B7CFF;font-weight:600}
+      #autocx-panel .cx-body{padding:10px 14px 12px;overflow-y:auto;min-height:120px}
       #autocx-panel .cx-page{display:none}
       #autocx-panel .cx-page.active{display:block}
-      #autocx-panel .cx-log{height:220px;overflow-y:auto;font:11px Consolas,monospace}
-      #autocx-panel .cx-log div{padding:2px 0;border-bottom:1px solid #2a2a2a;word-break:break-all}
-      #autocx-panel .cx-log .warn{color:#ffc107}.cx-log .error{color:#ff4d4f}
-      #autocx-panel .cx-item{display:flex;align-items:center;justify-content:space-between;padding:4px 0;gap:8px}
-      #autocx-panel .cx-item label{flex:1;color:#bbb}
+      /* ---------- 状态流 ---------- */
+      #autocx-panel .cx-status-item{padding:6px 0;border-bottom:1px solid #EEF1F6;font-size:12px}
+      #autocx-panel .cx-status-item .badge{display:inline-block;padding:1px 7px;border-radius:6px;color:#fff;
+        font-size:11px;margin-right:6px}
+      #autocx-panel .cx-status-item .t{color:#9ca3af;font-size:11px;margin-top:2px}
+      #autocx-panel .badge-video{background:#3B7CFF}
+      #autocx-panel .badge-quiz{background:#8B5CF6}
+      #autocx-panel .badge-knowledge{background:#22C55E}
+      #autocx-panel .badge-advance{background:#F59E0B}
+      #autocx-panel .badge-doc{background:#06B6D4}
+      #autocx-panel .badge-panel,#autocx-panel .badge-bootstrap,#autocx-panel .badge-antithrottle{background:#9ca3af}
+      /* ---------- 日志 ---------- */
+      #autocx-panel .cx-log{height:220px;overflow-y:auto;font:11px Consolas,monospace;color:#4b5563}
+      #autocx-panel .cx-log div{padding:2px 0;border-bottom:1px solid #F1F3F7;word-break:break-all}
+      #autocx-panel .cx-log .warn{color:#d97706}.cx-log .error{color:#dc2626}
+      /* ---------- 设置 ---------- */
+      #autocx-panel .cx-item{display:flex;align-items:center;justify-content:space-between;padding:5px 0;gap:8px}
+      #autocx-panel .cx-item label{flex:1;color:#4b5563;font-size:12.5px}
       #autocx-panel .cx-item input[type=text],#autocx-panel .cx-item input[type=password],
-      #autocx-panel .cx-item input[type=number]{width:180px;background:#2a2a2a;border:1px solid #444;
-        border-radius:4px;color:#e8e8e8;padding:3px 6px}
-      #autocx-panel .cx-btn{background:#1677ff;border:0;border-radius:4px;color:#fff;padding:5px 12px;cursor:pointer}
-      #autocx-panel .cx-test-result{margin-top:6px;font-size:12px;color:#8f8}
-      #autocx-panel .cx-switch{position:relative;width:36px;height:20px;background:#555;border-radius:10px;cursor:pointer}
-      #autocx-panel .cx-switch.on{background:#1677ff}
+      #autocx-panel .cx-item input[type=number],#autocx-panel .cx-item select{width:170px;background:#F5F7FA;
+        border:1px solid #E5E7EB;border-radius:7px;color:#1f2937;padding:4px 8px;font-size:12.5px}
+      #autocx-panel .cx-item input:focus,#autocx-panel .cx-item select:focus{outline:none;border-color:#3B7CFF}
+      #autocx-panel .cx-btn{background:linear-gradient(135deg,#3B7CFF,#60A5FA);border:0;border-radius:8px;
+        color:#fff;padding:6px 14px;cursor:pointer;font-size:12.5px}
+      #autocx-panel .cx-test-result{margin-top:6px;font-size:12px}
+      /* ---------- 开关 ---------- */
+      #autocx-panel .cx-switch{position:relative;width:36px;height:20px;background:#d1d5db;border-radius:10px;
+        cursor:pointer;transition:background .15s}
+      #autocx-panel .cx-switch.on{background:#3B7CFF}
       #autocx-panel .cx-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
-        border-radius:50%;background:#fff;transition:left .15s}
+        border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
       #autocx-panel .cx-switch.on::after{left:18px}
-      #autocx-panel .cx-status-item{padding:4px 0;border-bottom:1px solid #2a2a2a}
-      #autocx-panel .cx-status-item .t{color:#888;font-size:11px}
     `);
 
     elmGetter.get('body', 15000).then((body) => {
+      const RING_LEN = 125.6; // 2πr (r=20) 进度环周长
       const $panel = $(`
         <div id="autocx-panel">
-          <div class="cx-ball" title="AutoCX">CX</div>
+          <div class="cx-ball" title="AutoCX(拖动移动,点击展开)">
+            <svg viewBox="0 0 46 46"><circle class="ring-bg" cx="23" cy="23" r="20"/><circle class="ring-fg" cx="23" cy="23" r="20"/></svg>
+            <div class="core">CX</div>
+            <div class="cx-dots"><i class="d-v" title="看课助手"></i><i class="d-q" title="答题助手"></i></div>
+            <div class="cx-menu">
+              <div class="mi" data-act="open">展开窗口 <span class="st">›</span></div>
+              <div class="mi" data-act="toggle-video">看课助手 <span class="st st-v"></span></div>
+              <div class="mi" data-act="toggle-quiz">答题助手 <span class="st st-q"></span></div>
+              <div class="mi" data-act="toggle-main">总开关 <span class="st st-m"></span></div>
+            </div>
+          </div>
           <div class="cx-box">
             <div class="cx-head">
               <b>AutoCX 学习通助手</b>
               <span class="cx-enabled cx-switch" title="总开关"></span>
               <button class="cx-close" title="收起">—</button>
+            </div>
+            <div class="cx-cards">
+              <div class="cx-card video" data-assist="assist.video">
+                <div class="t">▶ 看课助手</div>
+                <div class="s"><i></i><span class="st-v-txt">待命</span></div>
+                <div class="ck"></div>
+              </div>
+              <div class="cx-card quiz" data-assist="assist.quiz">
+                <div class="t">✎ 答题助手</div>
+                <div class="s"><i></i><span class="st-q-txt">待命</span></div>
+                <div class="ck"></div>
+              </div>
             </div>
             <div class="cx-tabs">
               <button data-tab="status" class="active">状态</button>
@@ -324,14 +408,14 @@
               <button data-tab="settings">设置</button>
             </div>
             <div class="cx-body">
-              <div class="cx-page active" data-page="status"><div class="cx-status-list"><i style="color:#888">等待任务帧上报…</i></div></div>
+              <div class="cx-page active" data-page="status"><div class="cx-status-list"><i style="color:#9ca3af">等待任务帧上报…</i></div></div>
               <div class="cx-page" data-page="log"><div class="cx-log"></div></div>
               <div class="cx-page" data-page="settings">
                 <div class="cx-item"><label>LLM Base URL</label><input type="text" data-cfg="llm.base_url"></div>
                 <div class="cx-item"><label>LLM API Key</label><input type="password" data-cfg="llm.api_key"></div>
                 <div class="cx-item"><label>LLM 模型</label><input type="text" data-cfg="llm.model"></div>
                 <div class="cx-item"><label>思考强度(推理模型提速)</label>
-                  <select data-cfg="llm.effort" style="width:180px;background:#2a2a2a;border:1px solid #444;border-radius:4px;color:#e8e8e8;padding:3px 6px">
+                  <select data-cfg="llm.effort">
                     <option value="low">low (推荐,快)</option>
                     <option value="medium">medium</option>
                     <option value="high">high</option>
@@ -352,17 +436,77 @@
         </div>`);
       $(body).append($panel);
 
-      // ---- 展开/收起 ----
-      $panel.find('.cx-ball').on('click', () => $panel.addClass('open'));
+      // ---- 助手开关渲染 ----
+      const assistOn = (k) => config.get(k) !== false;
+      const renderAssist = () => {
+        $panel.find('.cx-card.video').toggleClass('on', assistOn('assist.video'));
+        $panel.find('.cx-card.quiz').toggleClass('on', assistOn('assist.quiz'));
+        $panel.find('.cx-dots .d-v').toggleClass('on', assistOn('assist.video'));
+        $panel.find('.cx-dots .d-q').toggleClass('on', assistOn('assist.quiz'));
+        $panel.find('.cx-menu .st-v').text(assistOn('assist.video') ? '已开启' : '已关闭').toggleClass('on', assistOn('assist.video'));
+        $panel.find('.cx-menu .st-q').text(assistOn('assist.quiz') ? '已开启' : '已关闭').toggleClass('on', assistOn('assist.quiz'));
+        $panel.find('.cx-menu .st-m').text(isEnabled() ? '已开启' : '已关闭').toggleClass('on', isEnabled());
+        $panel.find('.cx-ball').toggleClass('off', !isEnabled());
+      };
+      renderAssist();
+      const toggleAssist = (k, name) => {
+        config.set(k, !assistOn(k));
+        renderAssist();
+        log.info('panel', `${name}: ${assistOn(k) ? '开' : '关'}`);
+      };
+      $panel.find('.cx-card.video').on('click', () => toggleAssist('assist.video', '看课助手'));
+      $panel.find('.cx-card.quiz').on('click', () => toggleAssist('assist.quiz', '答题助手'));
+
+      // ---- 迷你球:拖动 / 点击展开 / 快捷菜单 ----
+      const $ball = $panel.find('.cx-ball');
+      const savedPos = config.get('autocx.ballPos');
+      if (savedPos && savedPos.left != null) {
+        $panel.css({ left: savedPos.left + 'px', top: savedPos.top + 'px', right: 'auto', bottom: 'auto' });
+      }
+      let dragMoved = false;
+      $ball.on('mousedown', (e0) => {
+        if (e0.target.closest('.cx-menu')) return; // 菜单点击不触发拖动
+        const off = $panel.offset();
+        const dx = e0.clientX - off.left, dy = e0.clientY - off.top;
+        dragMoved = false;
+        const onMove = (e) => {
+          dragMoved = true;
+          const left = Math.min(Math.max(0, e.clientX - dx), window.innerWidth - 60);
+          const top = Math.min(Math.max(0, e.clientY - dy), window.innerHeight - 60);
+          $panel.css({ left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
+        };
+        const onUp = (e) => {
+          $(document).off('mousemove', onMove).off('mouseup', onUp);
+          if (dragMoved) {
+            const p = $panel.offset();
+            config.set('autocx.ballPos', { left: Math.round(p.left), top: Math.round(p.top) });
+          }
+        };
+        $(document).on('mousemove', onMove).on('mouseup', onUp);
+        e0.preventDefault();
+      });
+      $ball.on('click', (e) => {
+        if (dragMoved || e.target.closest('.cx-menu')) return;
+        $panel.addClass('open');
+      });
+      $panel.find('.cx-menu .mi').on('click', function (e) {
+        e.stopPropagation();
+        const act = $(this).data('act');
+        if (act === 'open') $panel.addClass('open');
+        else if (act === 'toggle-video') toggleAssist('assist.video', '看课助手');
+        else if (act === 'toggle-quiz') toggleAssist('assist.quiz', '答题助手');
+        else if (act === 'toggle-main') { config.set('autocx.enabled', !isEnabled()); renderAssist(); renderSwitch(); }
+      });
       $panel.find('.cx-close').on('click', () => $panel.removeClass('open'));
 
       // ---- 总开关 ----
       const $sw = $panel.find('.cx-enabled');
-      const renderSwitch = () => $sw.toggleClass('on', isEnabled());
+      const renderSwitch = () => { $sw.toggleClass('on', isEnabled()); $panel.find('.cx-ball').toggleClass('off', !isEnabled()); };
       renderSwitch();
       $sw.on('click', () => {
         config.set('autocx.enabled', !isEnabled());
         renderSwitch();
+        renderAssist();
         log.info('panel', `总开关: ${isEnabled() ? '开' : '关'}`);
       });
 
@@ -387,13 +531,24 @@
 
       // ---- LLM 测试 ----
       $panel.find('.cx-test-llm').on('click', function () {
-        const $r = $panel.find('.cx-test-result').css('color', '#aaa').text('测试中…');
+        const $r = $panel.find('.cx-test-result').css('color', '#6b7280').text('测试中…');
         $(this).prop('disabled', true);
         llm.test()
-          .then((msg) => $r.css('color', '#8f8').text('✅ ' + msg))
-          .catch((e) => $r.css('color', '#ff4d4f').text('❌ ' + e.message))
+          .then((msg) => $r.css('color', '#16a34a').text('✅ ' + msg))
+          .catch((e) => $r.css('color', '#dc2626').text('❌ ' + e.message))
           .finally(() => $(this).prop('disabled', false));
       });
+
+      // ---- 进度环 ----
+      const setRing = (pct) => {
+        const p = Math.min(100, Math.max(0, pct));
+        $panel.find('.ring-fg').css('stroke-dashoffset', RING_LEN * (1 - p / 100));
+      };
+
+      // ---- 助手卡片实时状态 ----
+      const setCardStatus = (assist, text) => {
+        $panel.find(assist === 'assist.video' ? '.st-v-txt' : '.st-q-txt').text(text);
+      };
 
       // ---- 跨帧日志/状态聚合 ----
       const fmt = (ts) => new Date(ts).toTimeString().slice(0, 8);
@@ -409,9 +564,22 @@
         if (!remote || !nv) return;
         const $list = $panel.find('.cx-status-list');
         $list.find('i').remove();
-        $list.prepend(`<div class="cx-status-item"><b>[${nv.module}]</b> ${nv.state} ${nv.detail || ''}<div class="t">${fmt(nv.ts)} ${nv.frame}</div></div>`);
+        $list.prepend(`<div class="cx-status-item"><span class="badge badge-${nv.module}">${nv.module}</span>${nv.state} ${nv.detail || ''}<div class="t">${fmt(nv.ts)} ${nv.frame}</div></div>`);
         const items = $list.children();
         if (items.length > 20) items.slice(20).remove();
+        // 驱动卡片状态与进度环
+        const detail = nv.detail || '';
+        if (nv.module === 'video' || nv.module === 'doc' || nv.module === 'knowledge') {
+          setCardStatus('assist.video', detail || nv.state);
+        }
+        if (nv.module === 'quiz') {
+          setCardStatus('assist.quiz', detail || nv.state);
+        }
+        if (nv.module === 'video') {
+          const m = detail.match(/(\d+)%/);
+          if (nv.state === 'playing' && m) setRing(Number(m[1]));
+          if (nv.state === 'done') setRing(100);
+        }
       });
 
       log.info('panel', '悬浮面板已加载');
@@ -440,6 +608,11 @@
   // PPT/PDF: 找"下一页"按钮循环点击;图书/长图: 滚动到底。完成即停。
   function initDocFrame() {
     const module = 'doc';
+    if (config.get('assist.video') === false) {
+      log.info(module, '看课助手已关闭,跳过');
+      report(module, 'disabled', '看课助手已关闭');
+      return;
+    }
     report(module, 'start', '文档/课件任务,开始自动完成');
     log.info(module, '文档任务启动');
     let stopped = false;
@@ -546,6 +719,11 @@
   // 章节测验: 接口劫持/DOM 提取题目 -> LLM -> 自动勾选 -> 人工确认提交(绝不自动提交)
   function initQuizPage() {
     const module = 'quiz';
+    if (config.get('assist.quiz') === false) {
+      log.info(module, '答题助手已关闭,跳过');
+      report(module, 'disabled', '答题助手已关闭');
+      return;
+    }
     report(module, 'start', '检测到测验页面');
     log.info(module, '测验页面启动');
 
@@ -962,6 +1140,11 @@
   // 页面真实播放 + 倍速 + 静音;弹题随机作答;风控验证暂停等人工;完成检测上报
   function initVideoFrame() {
     const module = 'video';
+    if (config.get('assist.video') === false) {
+      log.info(module, '看课助手已关闭,跳过');
+      report(module, 'disabled', '看课助手已关闭');
+      return;
+    }
     report(module, 'start', '视频任务启动');
     log.info(module, '视频任务启动');
     spoofVisibility(); // 防止后台标签被暂停/停收进度
