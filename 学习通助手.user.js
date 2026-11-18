@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.6.2
+// @version      0.7.0
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -79,6 +79,7 @@
     'video.speed': 2,
     'video.mute': true,
     'quiz.auto_fill': true,
+    'quiz.auto_submit': false, // 自动提交(仅全部答完才生效,默认关闭)
     'doc.interval': 2,      // 翻页间隔基数(秒)
     'debug': false,
   };
@@ -296,6 +297,7 @@
                 <div class="cx-item"><label>视频倍速 (1-16)</label><input type="number" min="1" max="16" data-cfg="video.speed"></div>
                 <div class="cx-item"><label>视频静音</label><input type="checkbox" data-cfg="video.mute"></div>
                 <div class="cx-item"><label>自动勾选答案</label><input type="checkbox" data-cfg="quiz.auto_fill"></div>
+                <div class="cx-item"><label>自动提交(全答完才生效)</label><input type="checkbox" data-cfg="quiz.auto_submit"></div>
                 <div class="cx-item"><label>翻页间隔基数(秒)</label><input type="number" min="1" max="10" data-cfg="doc.interval"></div>
                 <div class="cx-item"><label>调试日志</label><input type="checkbox" data-cfg="debug"></div>
                 <div class="cx-item"><button class="cx-btn cx-test-llm">测试 LLM 连接</button></div>
@@ -537,6 +539,7 @@
 
       let failStreak = 0;
       let stopped = false;
+      const stats = { ok: 0, failed: [] };
 
       // 单题处理(含一次重试)
       const answerOne = async (q) => {
@@ -549,13 +552,19 @@
             const parsed = parseAnswer(q, raw);
             setBadge(q, `AI: ${parsed.display}`, parsed.ok ? 'ok' : 'bad');
             log.info(module, `题目${q.index} AI回答: ${parsed.display}${parsed.ok ? '' : ' (解析失败,未作答)'}`);
-            if (parsed.ok && config.get('quiz.auto_fill')) fillAnswer(q, parsed);
+            if (parsed.ok) {
+              stats.ok++;
+              if (config.get('quiz.auto_fill')) fillAnswer(q, parsed);
+            } else {
+              stats.failed.push(q.index);
+            }
             return;
           } catch (e) {
             log.warn(module, `题目${q.index} 第${attempt}次调用失败: ${e.message}`);
           }
         }
         failStreak++;
+        stats.failed.push(q.index);
         setBadge(q, '失败', 'bad');
         if (failStreak >= 3) {
           stopped = true;
@@ -574,10 +583,57 @@
       };
       await Promise.all([worker(), worker()]);
 
-      if (!stopped) {
-        log.info(module, '答题流程结束。请人工核对后自行提交(脚本不会自动提交)。');
+      if (stopped) return;
+      if (config.get('quiz.auto_submit')) {
+        if (stats.failed.length === 0 && stats.ok === questions.length) {
+          autoSubmit();
+        } else {
+          log.warn(module, `有 ${stats.failed.length} 题未答(题号: ${stats.failed.join(',')}),不自动提交,请人工处理后提交。`);
+          report(module, 'filled', `${stats.ok}/${questions.length} 已答,有未答题,等待人工`);
+        }
+      } else {
+        log.info(module, '答题流程结束。请人工核对后自行提交(自动提交可在设置中开启)。');
         report(module, 'filled', '答题完成,等待人工核对提交');
       }
+    }
+
+    /* ---------- 自动提交(仅在全部答完时调用) ---------- */
+    function autoSubmit() {
+      log.info(module, '全部题目已作答,3 秒后自动提交…');
+      report(module, 'submitting', '全部答完,自动提交中');
+      setTimeout(() => {
+        try {
+          // 拦截原生 confirm/alert,防止提交确认框卡住流程(10 秒后恢复)
+          const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+          const oldConfirm = win.confirm, oldAlert = win.alert;
+          win.confirm = () => true;
+          win.alert = () => true;
+          setTimeout(() => { win.confirm = oldConfirm; win.alert = oldAlert; }, 10000);
+
+          const btn = $(SELECTORS.quiz.submit).filter(':visible').get(0);
+          if (!btn) {
+            log.error(module, '未找到提交按钮,请人工提交');
+            report(module, 'error', '未找到提交按钮');
+            return;
+          }
+          btn.click();
+          log.info(module, '已点击提交按钮');
+          // 二次确认弹窗(常见 UI 库确认按钮)
+          setTimeout(() => {
+            const confirmBtn = $('.layui-layer-btn0, .el-message-box__btns .el-button--primary, .ant-modal-confirm .ant-btn-primary, .dialog-confirm, .confirm-btn')
+              .filter(':visible').get(0);
+            if (confirmBtn) {
+              confirmBtn.click();
+              log.info(module, '已点击二次确认');
+            }
+            log.info(module, '自动提交完成');
+            report(module, 'submitted', '自动提交完成');
+          }, 1200);
+        } catch (e) {
+          log.error(module, '自动提交异常: ' + e.message + ',请人工提交');
+          report(module, 'error', '自动提交异常,请人工提交');
+        }
+      }, 3000);
     }
 
     /* ---------- 题目提取:接口 JSON ---------- */
