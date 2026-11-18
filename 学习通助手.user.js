@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.6.0
+// @version      0.6.2
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -74,6 +74,8 @@
     'llm.base_url': 'https://api.deepseek.com/v1',
     'llm.api_key': '',
     'llm.model': 'deepseek-chat',
+    'llm.effort': 'low',   // 思考强度: ''(不发送)/low/medium/high;推理模型建议 low 提速
+    'llm.timeout': 60,     // 单题请求超时(秒)
     'video.speed': 2,
     'video.mute': true,
     'quiz.auto_fill': true,
@@ -171,7 +173,14 @@
       const key = config.get('llm.api_key');
       const model = config.get('llm.model');
       if (!key) return Promise.reject(new Error('未配置 llm.api_key'));
-      return new Promise((resolve, reject) => {
+      const effort = String(config.get('llm.effort') || '').trim();
+      const send = (withEffort) => new Promise((resolve, reject) => {
+        const body = {
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+        };
+        if (withEffort && effort) body.reasoning_effort = effort;
         GM_xmlhttpRequest({
           method: 'POST',
           url: base + '/chat/completions',
@@ -179,14 +188,15 @@
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + key,
           },
-          data: JSON.stringify({
-            model,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.1,
-          }),
-          timeout: (opts && opts.timeout) || 90000,
+          data: JSON.stringify(body),
+          timeout: (opts && opts.timeout) || (Math.max(10, Number(config.get('llm.timeout')) || 60) * 1000),
           onload(res) {
             try {
+              // 网关/模型不认 reasoning_effort:降级为不带参重试一次
+              if (res.status === 400 && withEffort && effort &&
+                  /reasoning|effort|unknown|invalid/i.test(res.responseText || '')) {
+                return send(false).then(resolve, reject);
+              }
               if (res.status < 200 || res.status >= 300) {
                 return reject(new Error(`HTTP ${res.status}: ${res.responseText.slice(0, 200)}`));
               }
@@ -203,6 +213,7 @@
           ontimeout: () => reject(new Error('请求超时')),
         });
       });
+      return send(true);
     },
     /** 面板"测试连接"按钮用 */
     test() {
@@ -274,6 +285,14 @@
                 <div class="cx-item"><label>LLM Base URL</label><input type="text" data-cfg="llm.base_url"></div>
                 <div class="cx-item"><label>LLM API Key</label><input type="password" data-cfg="llm.api_key"></div>
                 <div class="cx-item"><label>LLM 模型</label><input type="text" data-cfg="llm.model"></div>
+                <div class="cx-item"><label>思考强度(推理模型提速)</label>
+                  <select data-cfg="llm.effort" style="width:180px;background:#2a2a2a;border:1px solid #444;border-radius:4px;color:#e8e8e8;padding:3px 6px">
+                    <option value="low">low (推荐,快)</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="">不发送该参数</option>
+                  </select></div>
+                <div class="cx-item"><label>单题超时(秒)</label><input type="number" min="10" max="300" data-cfg="llm.timeout"></div>
                 <div class="cx-item"><label>视频倍速 (1-16)</label><input type="number" min="1" max="16" data-cfg="video.speed"></div>
                 <div class="cx-item"><label>视频静音</label><input type="checkbox" data-cfg="video.mute"></div>
                 <div class="cx-item"><label>自动勾选答案</label><input type="checkbox" data-cfg="quiz.auto_fill"></div>
@@ -525,7 +544,7 @@
         setBadge(q, '思考中…', 'thinking');
         for (let attempt = 1; attempt <= 2; attempt++) {
           try {
-            const raw = await llm.chat(buildPrompt(q), { timeout: 90000 });
+            const raw = await llm.chat(buildPrompt(q));
             failStreak = 0;
             const parsed = parseAnswer(q, raw);
             setBadge(q, `AI: ${parsed.display}`, parsed.ok ? 'ok' : 'bad');
@@ -596,6 +615,16 @@
       } catch (_) { return null; }
     }
 
+    /* ---------- 选项元素去重(外层 li 与内层字母元素会重复命中) ---------- */
+    function pickOptionEls($q) {
+      const all = $q.find(SELECTORS.quiz.optionList).get();
+      const outer = all.filter((el) => {
+        const t = $(el).text().replace(/\s+/g, ' ').trim();
+        return /^[A-Z][、.\s]/.test(t) && t.length > 2;
+      });
+      return outer.length ? outer : all;
+    }
+
     /* ---------- 题目提取:DOM 降级 ---------- */
     function extractQuestionsFromDOM() {
       return $(SELECTORS.quiz.question).map(function () {
@@ -605,13 +634,14 @@
         const typeText = $q.text();
         const type = /多选题/.test(typeText) ? 'multi' : /判断题/.test(typeText) ? 'judge'
           : /填空题/.test(typeText) ? 'blank' : 'single';
-        const options = $q.find(SELECTORS.quiz.optionList).map(function (i) {
-          const t = $(this).text().replace(/\s+/g, ' ').trim();
+        const optEls = pickOptionEls($q);
+        const options = optEls.map((el, i) => {
+          const t = $(el).text().replace(/\s+/g, ' ').trim();
           const m = t.match(/^([A-Z])[、.\s]/);
-          return { label: m ? m[1] : String.fromCharCode(65 + i), text: t.replace(/^[A-Z][、.\s]/, '') };
-        }).get().filter((o) => o.text);
+          return { label: m ? m[1] : String.fromCharCode(65 + i), text: t.replace(/^[A-Z][、.\s]/, '').trim() };
+        }).filter((o) => o.text);
         const stem = stemRaw.replace(/^【.*?】/, '').trim();
-        return { type, stem, options, dom: this };
+        return { type, stem, options, dom: this, optDoms: optEls };
       }).get().filter((q) => q.stem);
     }
 
@@ -665,15 +695,14 @@
         });
         return;
       }
-      // 选择/判断:点击对应选项行(学习通选项通常点击 li 即选中)
-      const $opts = $q.find(SELECTORS.quiz.optionList);
+      // 选择/判断:点击对应选项行(用提取时去重后的同一份元素,避免错位)
       (parsed.letters || []).forEach((letter) => {
         const idx = letter.charCodeAt(0) - 65;
-        const $opt = $opts.eq(idx);
-        if (!$opt.length) return;
-        const input = $opt.find('input[type=radio],input[type=checkbox]').get(0);
+        const optEl = (q.optDoms || [])[idx];
+        if (!optEl) return;
+        const input = $(optEl).find('input[type=radio],input[type=checkbox]').get(0);
         if (input && !input.checked) input.click();
-        else if (!input) $opt.get(0).click();
+        else if (!input) optEl.click();
       });
     }
 
