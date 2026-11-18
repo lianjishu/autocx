@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.7.3
+// @version      0.7.6
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -77,7 +77,7 @@
     'llm.api_key': '',
     'llm.model': 'deepseek-chat',
     'llm.effort': 'low',   // 思考强度: ''(不发送)/low/medium/high;推理模型建议 low 提速
-    'llm.timeout': 60,     // 单题请求超时(秒)
+    'llm.timeout': 180,    // 响应停滞超时(秒):N 秒完全无数据才判负;网关排队/缓冲/慢思考都覆盖
     'video.speed': 2,
     'video.mute': true,
     'quiz.auto_fill': true,
@@ -125,9 +125,9 @@
     const { hostname, pathname, href } = location;
     const path = pathname.toLowerCase();
 
-    // 任务点 iframe: ananas 模块
-    if (/\/ananas\/modules\/video\//.test(path)) return 'video';
-    if (/\/ananas\/modules\/audio\//.test(path)) return 'audio';
+    // 任务点 iframe: ananas 模块(收紧到播放器主页,排除 subtitle-bridge 等辅助页)
+    if (/\/ananas\/modules\/video\/index\.html/.test(path)) return 'video';
+    if (/\/ananas\/modules\/audio\/index\.html/.test(path)) return 'audio';
     if (/\/ananas\/modules\/(pdf|ppt|pptdemo)\//.test(path)) return 'doc';
     if (/\/ananas\/modules\/(innertemplet|book|read)\//.test(path)) return 'book';
 
@@ -163,12 +163,14 @@
   }
 
   /* ============================== LLM 模块 ================================= */
-  // OpenAI 兼容客户端;GM_xmlhttpRequest 自带跨域,无需 @connect 逐个声明
+  // OpenAI 兼容客户端;GM_xmlhttpRequest 自带跨域。
+  // 采用 SSE 流式接收:模型每吐 token 都算活跃(推理模型的思考 token 同样流动),
+  // 只在"停滞超时"内完全无数据才判负——思考再久也不算失败;HTTP 错误码立即判负。
   const llm = {
     /**
-     * 发送单轮对话,返回文本内容
+     * 发送单轮对话(流式),返回文本内容
      * @param {string} prompt
-     * @param {{timeout?: number}} [opts]
+     * @param {{idleTimeout?: number}} [opts] 停滞超时(毫秒),默认读配置 llm.timeout(秒)
      * @returns {Promise<string>}
      */
     chat(prompt, opts) {
@@ -177,43 +179,83 @@
       const model = config.get('llm.model');
       if (!key) return Promise.reject(new Error('未配置 llm.api_key'));
       const effort = String(config.get('llm.effort') || '').trim();
+      const idleMs = (opts && opts.idleTimeout) || (Math.max(15, Number(config.get('llm.timeout')) || 60) * 1000);
+
       const send = (withEffort) => new Promise((resolve, reject) => {
         const body = {
           model,
           messages: [{ role: 'user', content: prompt }],
           temperature: 0.1,
+          stream: true,
         };
         if (withEffort && effort) body.reasoning_effort = effort;
+
+        let settled = false;
+        let lastActivity = Date.now();
+        const done = (fn, val) => {
+          if (settled) return;
+          settled = true;
+          clearInterval(idleWatch);
+          fn(val);
+        };
+        // 停滞看门狗:idleMs 内完全无数据到达才判负
+        const idleWatch = setInterval(() => {
+          if (Date.now() - lastActivity > idleMs) {
+            done(reject, new Error(`响应停滞(>${Math.round(idleMs / 1000)}s 无数据)`));
+          }
+        }, 5000);
+
         GM_xmlhttpRequest({
           method: 'POST',
           url: base + '/chat/completions',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + key,
+            'Accept': 'text/event-stream',
           },
           data: JSON.stringify(body),
-          timeout: (opts && opts.timeout) || (Math.max(10, Number(config.get('llm.timeout')) || 60) * 1000),
+          timeout: 15 * 60 * 1000, // 硬顶 15 分钟防死挂,思考再久也等
+          onreadystatechange(res) {
+            if (res.readyState >= 3 && res.responseText != null) lastActivity = Date.now();
+          },
           onload(res) {
             try {
               // 网关/模型不认 reasoning_effort:降级为不带参重试一次
               if (res.status === 400 && withEffort && effort &&
                   /reasoning|effort|unknown|invalid/i.test(res.responseText || '')) {
-                return send(false).then(resolve, reject);
+                return send(false).then((v) => done(resolve, v), (e) => done(reject, e));
               }
               if (res.status < 200 || res.status >= 300) {
-                return reject(new Error(`HTTP ${res.status}: ${res.responseText.slice(0, 200)}`));
+                return done(reject, new Error(`HTTP ${res.status}: ${(res.responseText || '').slice(0, 200)}`));
               }
-              const data = JSON.parse(res.responseText);
-              const text = data && data.choices && data.choices[0] && data.choices[0].message
-                ? data.choices[0].message.content : '';
-              if (!text) return reject(new Error('响应中无 choices[0].message.content'));
-              resolve(text.trim());
+              const raw = res.responseText || '';
+              // 1) SSE 流解析:拼接所有 delta.content
+              let text = '';
+              if (/^data:/m.test(raw)) {
+                for (const line of raw.split('\n')) {
+                  const t = line.trim();
+                  if (!t.startsWith('data:') || t === 'data: [DONE]') continue;
+                  try {
+                    const j = JSON.parse(t.slice(5).trim());
+                    const d = j.choices && j.choices[0] && j.choices[0].delta;
+                    if (d && d.content) text += d.content;
+                  } catch (_) { /* 半行/心跳行,忽略 */ }
+                }
+              }
+              // 2) 非流式 JSON 兜底(网关忽略 stream 参数时)
+              if (!text) {
+                const data = JSON.parse(raw);
+                text = data && data.choices && data.choices[0] && data.choices[0].message
+                  ? (data.choices[0].message.content || '') : '';
+              }
+              if (!text.trim()) return done(reject, new Error('响应中无可用内容'));
+              done(resolve, text.trim());
             } catch (e) {
-              reject(e);
+              done(reject, e);
             }
           },
-          onerror: (e) => reject(new Error('网络错误: ' + (e && e.error || 'unknown'))),
-          ontimeout: () => reject(new Error('请求超时')),
+          onerror: (e) => done(reject, new Error('网络错误: ' + (e && e.error || 'unknown'))),
+          ontimeout: () => done(reject, new Error('请求总时长超 15 分钟,已中止')),
         });
       });
       return send(true);
@@ -295,7 +337,7 @@
                     <option value="high">high</option>
                     <option value="">不发送该参数</option>
                   </select></div>
-                <div class="cx-item"><label>单题超时(秒)</label><input type="number" min="10" max="300" data-cfg="llm.timeout"></div>
+                <div class="cx-item"><label>停滞超时(秒,慢模型调大)</label><input type="number" min="15" max="600" data-cfg="llm.timeout"></div>
                 <div class="cx-item"><label>视频倍速 (1-16)</label><input type="number" min="1" max="16" data-cfg="video.speed"></div>
                 <div class="cx-item"><label>视频静音</label><input type="checkbox" data-cfg="video.mute"></div>
                 <div class="cx-item"><label>自动勾选答案</label><input type="checkbox" data-cfg="quiz.auto_fill"></div>
@@ -546,6 +588,17 @@
 
     async function run() {
       if (!isEnabled()) return log.info(module, '总开关关闭,不执行答题');
+      // 跨帧锁:同一测验可能被多个嵌套帧同时识别(ananas/work + doHomeWorkNew),
+      // 抢锁成功的实例才干活,其余退出,防止重复答题/重复提交
+      const workKey = (location.href.match(/workId=([0-9a-z]+)/i) || [null, location.pathname])[1];
+      const LOCK_KEY = 'autocx.quiz.lock';
+      const lock = GM_getValue(LOCK_KEY);
+      if (lock && lock.workKey === workKey && Date.now() - lock.ts < 5 * 60 * 1000) {
+        log.info(module, '另一个帧已接管本测验,本帧退出');
+        return;
+      }
+      GM_setValue(LOCK_KEY, { workKey, ts: Date.now() });
+
       const questions = (captured && captured.length ? captured : extractQuestionsFromDOM())
         .map((q, i) => ({ ...q, index: i + 1 }));
       if (!questions.length) {
