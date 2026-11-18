@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.8.2
+// @version      0.9.0
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -821,7 +821,7 @@
       let stopped = false;
       const stats = { ok: 0, failed: [] };
 
-      // 单题处理(含一次重试)
+      // 单题处理(含一次重试;全链路日志:题型/原始回答/规范化/实际填写)
       const answerOne = async (q) => {
         if (stopped || !isEnabled()) return;
         setBadge(q, '思考中…', 'thinking');
@@ -830,14 +830,30 @@
             const raw = await llm.chat(buildPrompt(q));
             failStreak = 0;
             const parsed = parseAnswer(q, raw);
+            // 全链路日志:题型 -> 原始回答 -> 规范化答案
+            log.info(module, `题目${q.index}[${q.type}] 原始回答: ${String(raw).replace(/\s+/g, ' ').slice(0, 80)} → 规范化: ${parsed.normalized || '(无)'}`);
             setBadge(q, `AI: ${parsed.display}`, parsed.ok ? 'ok' : 'bad');
-            log.info(module, `题目${q.index} AI回答: ${parsed.display}${parsed.ok ? '' : ' (解析失败,未作答)'}`);
-            if (parsed.ok) {
-              stats.ok++;
-              if (config.get('quiz.auto_fill')) fillAnswer(q, parsed);
-            } else {
+            if (!parsed.ok) {
               stats.failed.push(q.index);
+              log.warn(module, `题目${q.index} 解析失败,未作答`);
+              return;
             }
+            if (config.get('quiz.auto_fill')) {
+              fillAnswer(q, parsed);
+              // 填后校验:回读 DOM 勾选状态,与意图不一致则判失败(阻断自动提交)
+              const actual = q.type === 'blank' ? null : readCheckedLetters(q);
+              if (actual !== null) {
+                const expect = parsed.letters.join('');
+                log.info(module, `题目${q.index} 填写校验: 意图=${expect} 实际=${actual}${expect === actual ? ' ✓' : ' ✗'}`);
+                if (expect !== actual) {
+                  log.error(module, `题目${q.index} 填写与解析不一致(意图 ${expect},实际 ${actual}),中止本题`);
+                  setBadge(q, `AI: ${parsed.display}(填写异常)`, 'bad');
+                  stats.failed.push(q.index);
+                  return;
+                }
+              }
+            }
+            stats.ok++;
             return;
           } catch (e) {
             log.warn(module, `题目${q.index} 第${attempt}次调用失败: ${e.message}`);
@@ -994,10 +1010,13 @@
     function normalizeJsonQuestion(q) {
       try {
         const stem = String(q.title || q.question || q.stem || '').replace(/<[^>]+>/g, '').trim();
-        const rawType = String(q.type ?? q.questionType ?? '');
-        const type = /多选|multiple|multi/i.test(rawType) ? 'multi'
-          : /判断|judge|truefalse/i.test(rawType) ? 'judge'
-          : /填空|blank|fill/i.test(rawType) ? 'blank' : 'single';
+        const rawType = q.type ?? q.questionType ?? '';
+        const numType = Number(rawType);
+        const type = numType === 1 ? 'multi' : numType === 3 ? 'judge' : numType === 2 ? 'blank'
+          : numType === 0 ? 'single'
+          : /多选|multiple|multi/i.test(String(rawType)) ? 'multi'
+          : /判断|judge|truefalse/i.test(String(rawType)) ? 'judge'
+          : /填空|blank|fill/i.test(String(rawType)) ? 'blank' : 'single';
         const optsRaw = q.options || q.titleOption || q.answers || [];
         const options = (Array.isArray(optsRaw) ? optsRaw : []).map((o, i) => ({
           label: String.fromCharCode(65 + i),
@@ -1005,6 +1024,23 @@
         }));
         return { type, stem, options, dom: null };
       } catch (_) { return null; }
+    }
+
+    /* ---------- 题型识别(权威:li[qtype];其次中英双语文本标记) ---------- */
+    // 学习通 qtype: 0=单选 1=多选 3=判断 2=填空。文本兜底兼容中英文 UI 与字体混淆。
+    function detectType($q, typeText) {
+      const qt = $q.find('li[qtype]').first().attr('qtype');
+      if (qt !== undefined && qt !== null && qt !== '') {
+        if (qt === '0') return 'single';
+        if (qt === '1') return 'multi';
+        if (qt === '3') return 'judge';
+        if (qt === '2') return 'blank';
+      }
+      const t = String(typeText || '');
+      if (/多选题|multiple/i.test(t)) return 'multi';
+      if (/判断题|true or false/i.test(t)) return 'judge';
+      if (/填空题|fill/i.test(t)) return 'blank';
+      return 'single';
     }
 
     /* ---------- 选项元素去重(外层 li 与内层字母元素会重复命中) ---------- */
@@ -1024,8 +1060,7 @@
         const stemRaw = $q.find(SELECTORS.quiz.title).first().text().replace(/\s+/g, ' ').trim()
           || $q.clone().children().remove().end().text().replace(/\s+/g, ' ').trim();
         const typeText = $q.text();
-        const type = /多选题/.test(typeText) ? 'multi' : /判断题/.test(typeText) ? 'judge'
-          : /填空题/.test(typeText) ? 'blank' : 'single';
+        const type = detectType($q, typeText);
         const optEls = pickOptionEls($q);
         const options = optEls.map((el, i) => {
           const t = $(el).text().replace(/\s+/g, ' ').trim();
@@ -1049,26 +1084,63 @@
       if (q.type === 'blank') {
         p += '要求:直接给出每个空的答案,多空用|分隔,不要任何解释。\n';
       } else if (q.type === 'multi') {
-        p += '要求:这是多选题,只回复正确选项的字母(如 ACD),不要任何解释。\n';
+        p += '要求:这是多选题,只回复所有正确选项的字母(如 BCD),不要任何解释。\n';
       } else {
         p += '要求:只回复正确选项的字母(如 B),不要任何解释。\n';
       }
       return p;
     }
 
-    /* ---------- 答案解析(正则容错) ---------- */
+    /* ---------- 答案规范化:全角转半角,兼容 BCD / B,C,D / B、C、D / B C D / 带解释 ---------- */
+    function normalizeLetters(raw) {
+      if (!raw) return '';
+      // 全角字母转半角
+      let text = String(raw).replace(/[Ａ-Ｇａ-ｇ]/g, (c) => {
+        const code = c.charCodeAt(0);
+        return String.fromCharCode(code >= 0xFF41 ? code - 0xFF41 + 97 : code - 0xFF21 + 65);
+      }).toUpperCase();
+      const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+      // 1) 从后往前找"纯答案行"(可带"答案:"前缀,只含字母与分隔符)
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const m = lines[i].match(/^(?:答案[:：是\s]*)?([A-G](?:[\s,，、;；·]*[A-G])*)[。.]?$/);
+        if (m) return m[1].replace(/[^A-G]/g, '');
+      }
+      // 2) 行尾答案: "...所以选 BCD" / "answer: BCD"
+      const tail = text.match(/([A-G](?:[\s,，、;；]*[A-G])+|\b[A-G]\b)\s*[。.]?\s*$/);
+      if (tail) return tail[1].replace(/[^A-G]/g, '');
+      // 3) 兜底:全文本字母去重排序(可能混入解释里的字母,仅保底)
+      return [...new Set(text.match(/[A-G]/g) || [])].sort().join('');
+    }
+
+    /* ---------- 答案解析 ---------- */
     function parseAnswer(q, raw) {
-      const text = raw.trim();
+      const text = String(raw || '').trim();
       if (q.type === 'blank') {
         const parts = text.split(/[|｜]/).map((s) => s.trim()).filter(Boolean);
-        return parts.length ? { ok: true, display: parts.join(' | '), blanks: parts } : { ok: false, display: text.slice(0, 30) };
+        return parts.length
+          ? { ok: true, display: parts.join(' | '), blanks: parts, normalized: parts.join('|') }
+          : { ok: false, display: text.slice(0, 30), normalized: '' };
       }
-      const letters = [...new Set((text.toUpperCase().match(/[A-G]/g) || []))].sort();
-      if (!letters.length) return { ok: false, display: text.slice(0, 30) };
+      const norm = normalizeLetters(text);
+      if (!norm) return { ok: false, display: text.slice(0, 30), normalized: '' };
       if (q.type === 'single' || q.type === 'judge') {
-        return { ok: true, display: letters[0], letters: [letters[0]] };
+        const letter = norm[0];
+        return { ok: true, display: letter, letters: [letter], normalized: letter };
       }
-      return { ok: true, display: letters.join(''), letters };
+      // 多选:保留完整字母序列(排序规范化,填写用 includes 判断与顺序无关)
+      const sorted = norm.split('').sort().join('');
+      return { ok: true, display: sorted, letters: sorted.split(''), normalized: sorted };
+    }
+
+    /* ---------- 填后校验:回读 DOM 勾选状态与意图比对 ---------- */
+    function readCheckedLetters(q) {
+      const letters = [];
+      (q.optDoms || []).forEach((el, i) => {
+        const input = $(el).find('input[type=radio],input[type=checkbox]').get(0);
+        const checked = (input && input.checked) || el.getAttribute('aria-checked') === 'true';
+        if (checked) letters.push(String.fromCharCode(65 + i));
+      });
+      return letters.join('');
     }
 
     /* ---------- 自动勾选 ---------- */
@@ -1087,14 +1159,21 @@
         });
         return;
       }
-      // 选择/判断:点击对应选项行(用提取时去重后的同一份元素,避免错位)
-      (parsed.letters || []).forEach((letter) => {
-        const idx = letter.charCodeAt(0) - 65;
-        const optEl = (q.optDoms || [])[idx];
-        if (!optEl) return;
-        const input = $(optEl).find('input[type=radio],input[type=checkbox]').get(0);
-        if (input && !input.checked) input.click();
-        else if (!input) optEl.click();
+      // 选择/判断:用提取时去重后的同一份元素,避免内外层错位
+      const isChecked = (el) => {
+        const input = $(el).find('input[type=radio],input[type=checkbox]').get(0);
+        return (input && input.checked) || el.getAttribute('aria-checked') === 'true';
+      };
+      const click = (el) => {
+        const input = $(el).find('input[type=radio],input[type=checkbox]').get(0);
+        if (input) input.click(); else el.click();
+      };
+      (q.optDoms || []).forEach((el, i) => {
+        const letter = String.fromCharCode(65 + i);
+        const want = (parsed.letters || []).includes(letter);
+        const cur = isChecked(el);
+        if (want && !cur) click(el);           // 该选未选 -> 选上
+        else if (!want && cur && q.type === 'multi') click(el); // 多选:清掉残留勾选
       });
     }
 
@@ -1109,6 +1188,13 @@
       const colors = { thinking: '#63b4ff', ok: '#21d181', bad: '#ff4d4f' };
       $b.text(text).css({ background: colors[state] || '#999', color: '#fff' });
     }
+
+    /* ---------- 回归测试钩子(控制台/自动化验证用) ---------- */
+    try {
+      (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).__autocxQuiz = {
+        parseAnswer, normalizeLetters,
+      };
+    } catch (_) { /* 暴露失败不影响主流程 */ }
   }
 
   /* ============================== 通用:反后台节流 ========================= */
