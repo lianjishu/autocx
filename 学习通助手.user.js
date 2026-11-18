@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.7.2
+// @version      0.7.3
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -59,7 +59,9 @@
       title: '.mark_name, .qyh-tit, .topic-title, .fontLabel, .question-title', // 题干
       optionList: 'ul li, .answerBg, .num_option, .choose-item',          // 选项
       blankInput: 'input[type=text], textarea',                           // 填空输入
-      submit: '.btnSubmit, .btn-submit, .submitBtn, .jb_btn, a[onclick*="btnBlueSubmit"], a[onclick*="submit"]', // 提交按钮(自动提交用)
+      submit: '.btnSubmit, .btn-submit, .submitBtn, a[onclick*="btnBlueSubmit"], a[onclick*="submit"]', // 答卷页提交按钮
+      submitConfirm: '.popBottom a.jb_btn, a.jb_btn', // workPop 确认弹窗按钮(在顶层页)
+      captchaWin: '#verifyCodeWin',                  // 验证码弹窗(出现则转人工)
     },
     // 顶层章节页
     top: {
@@ -623,12 +625,14 @@
     }
 
     /* ---------- 自动提交(仅在全部答完时调用) ---------- */
+    // 提交流程:点 .btnSubmit -> 顶层 workPop 弹窗("Submit?") -> 点其确认按钮
+    // -> 可能出现验证码(#verifyCodeWin,转人工) -> 验证结果(修掉假阳性)
     function autoSubmit() {
       log.info(module, '全部题目已作答,3 秒后自动提交…');
       report(module, 'submitting', '全部答完,自动提交中');
       setTimeout(() => {
         try {
-          // 拦截原生 confirm/alert,防止提交确认框卡住流程(10 秒后恢复)
+          // 拦截原生 confirm/alert,防止确认框卡住流程(10 秒后恢复)
           const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
           const oldConfirm = win.confirm, oldAlert = win.alert;
           win.confirm = () => true;
@@ -637,9 +641,8 @@
 
           const btn = $(SELECTORS.quiz.submit).filter(':visible').get(0);
           if (!btn) {
-            // 区分:已提交过(查看模式) vs 选择器失效
             const bodyText = document.body.innerText || '';
-            if (/已提交|已完成|查看答案|答案解析|不能再提交|Save & Submit/.test(bodyText) === false && !$('li[onclick*="addChoice"]').length) {
+            if (/已提交|已完成|查看答案|答案解析|不能再提交/.test(bodyText) || !$('li[onclick*="addChoice"]').length) {
               log.warn(module, '未找到提交按钮,且无可选题目——可能已提交过,无需操作');
               report(module, 'submitted', '测验已是完成状态');
             } else {
@@ -649,23 +652,71 @@
             return;
           }
           btn.click();
-          log.info(module, '已点击提交按钮');
-          // 二次确认弹窗(常见 UI 库确认按钮)
-          setTimeout(() => {
-            const confirmBtn = $('.layui-layer-btn0, .el-message-box__btns .el-button--primary, .ant-modal-confirm .ant-btn-primary, .dialog-confirm, .confirm-btn')
-              .filter(':visible').get(0);
-            if (confirmBtn) {
-              confirmBtn.click();
-              log.info(module, '已点击二次确认');
+          log.info(module, '已点击提交按钮,等待确认弹窗…');
+
+          // 等待顶层 workPop 确认弹窗出现并点击其确认按钮(最多 6 秒)
+          let tries = 0;
+          const popTimer = setInterval(() => {
+            tries++;
+            let confirmed = false;
+            try {
+              // workPop 渲染在顶层窗口;学习通帧链全程同源,可直接访问
+              const topDoc = (window.top && window.top.document) || document;
+              const $pop = $(topDoc).find(SELECTORS.quiz.submitConfirm)
+                .filter(function () {
+                  const t = $(this).text().replace(/\s+/g, '');
+                  return $(this).is(':visible') && /^(Submit|确定|确认|提交)$/.test(t);
+                });
+              if ($pop.length) {
+                $pop.get(0).click();
+                confirmed = true;
+                log.info(module, '已点击确认弹窗 Submit');
+              }
+            } catch (e) {
+              log.warn(module, '访问顶层弹窗失败: ' + e.message);
             }
-            log.info(module, '自动提交完成');
-            report(module, 'submitted', '自动提交完成');
-          }, 1200);
+            if (confirmed || tries >= 12) {
+              clearInterval(popTimer);
+              verifySubmitted(0);
+            }
+          }, 500);
         } catch (e) {
           log.error(module, '自动提交异常: ' + e.message + ',请人工提交');
           report(module, 'error', '自动提交异常,请人工提交');
         }
       }, 3000);
+
+      // 提交结果验证(最多 10 秒):验证码出现转人工;Submit 消失/状态完成才算成功
+      function verifySubmitted(round) {
+        if (round > 20) {
+          log.error(module, '提交结果未确认,请检查页面后人工处理');
+          report(module, 'error', '提交结果未确认');
+          return;
+        }
+        setTimeout(() => {
+          try {
+            // 1) 验证码弹窗出现 -> 转人工
+            const cap = document.querySelector(SELECTORS.quiz.captchaWin);
+            if (cap && cap.offsetWidth && cap.offsetHeight) {
+              log.warn(module, '出现图片验证码,请人工输入并完成提交');
+              report(module, 'captcha', '出现验证码,等待人工');
+              return;
+            }
+            // 2) 提交按钮消失或页面出现完成态文本 -> 成功
+            const stillBtn = $(SELECTORS.quiz.submit).filter(':visible').length > 0;
+            const bodyText = document.body.innerText || '';
+            const doneText = /已提交|已完成|查看答案|答案解析|成绩|得分/.test(bodyText) && !/To do/.test(bodyText);
+            if (!stillBtn || doneText) {
+              log.info(module, '自动提交成功 ✅');
+              report(module, 'submitted', '自动提交成功');
+              return;
+            }
+            verifySubmitted(round + 1);
+          } catch (e) {
+            verifySubmitted(round + 1);
+          }
+        }, 500);
+      }
     }
 
     /* ---------- 题目提取:接口 JSON ---------- */
