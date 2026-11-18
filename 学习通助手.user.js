@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.8.0
+// @version      0.8.1
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -309,7 +309,8 @@
       #autocx-panel.open .cx-box{display:flex}
       #autocx-panel.open .cx-ball{display:none}
       #autocx-panel .cx-head{display:flex;align-items:center;gap:8px;padding:10px 14px;
-        background:linear-gradient(135deg,#3B7CFF,#60A5FA);color:#fff}
+        background:linear-gradient(135deg,#3B7CFF,#60A5FA);color:#fff;cursor:grab;user-select:none}
+      #autocx-panel .cx-head:active{cursor:grabbing}
       #autocx-panel .cx-head b{flex:1;font-size:14px;letter-spacing:.5px}
       #autocx-panel .cx-head button{background:none;border:0;color:#fff;cursor:pointer;font-size:15px;opacity:.9}
       /* ---------- 助手卡片 ---------- */
@@ -457,47 +458,68 @@
       $panel.find('.cx-card.video').on('click', () => toggleAssist('assist.video', '看课助手'));
       $panel.find('.cx-card.quiz').on('click', () => toggleAssist('assist.quiz', '答题助手'));
 
-      // ---- 迷你球:拖动 / 点击展开 / 快捷菜单 ----
+      // ---- 拖动与位置约束:迷你球和展开窗口都可拖,且始终钳制在可视区内 ----
+      const clampIntoView = () => {
+        const rect = $panel.get(0).getBoundingClientRect();
+        const maxLeft = Math.max(0, window.innerWidth - rect.width - 8);
+        const maxTop = Math.max(0, window.innerHeight - rect.height - 8);
+        const left = Math.min(Math.max(0, rect.left), maxLeft);
+        const top = Math.min(Math.max(0, rect.top), maxTop);
+        $panel.css({ left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
+      };
+      const makeDraggable = (handle) => {
+        let moved = false;
+        handle.on('mousedown', (e0) => {
+          if (e0.target.closest('.cx-menu,button,.cx-switch')) return; // 控件不触发拖动
+          const off = $panel.offset();
+          const dx = e0.clientX - off.left, dy = e0.clientY - off.top;
+          moved = false;
+          const onMove = (e) => {
+            moved = true;
+            const rect = $panel.get(0).getBoundingClientRect();
+            const left = Math.min(Math.max(0, e.clientX - dx), Math.max(0, window.innerWidth - rect.width - 8));
+            const top = Math.min(Math.max(0, e.clientY - dy), Math.max(0, window.innerHeight - rect.height - 8));
+            $panel.css({ left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
+          };
+          const onUp = () => {
+            $(document).off('mousemove', onMove).off('mouseup', onUp);
+            if (moved) {
+              const p = $panel.offset();
+              config.set('autocx.ballPos', { left: Math.round(p.left), top: Math.round(p.top) });
+            }
+          };
+          $(document).on('mousemove', onMove).on('mouseup', onUp);
+          e0.preventDefault();
+        });
+        return () => moved;
+      };
+
       const $ball = $panel.find('.cx-ball');
       const savedPos = config.get('autocx.ballPos');
       if (savedPos && savedPos.left != null) {
         $panel.css({ left: savedPos.left + 'px', top: savedPos.top + 'px', right: 'auto', bottom: 'auto' });
+        // 加载即钳制:窗口缩放/上次拖到边缘都可能出屏
+        setTimeout(clampIntoView, 100);
       }
-      let dragMoved = false;
-      $ball.on('mousedown', (e0) => {
-        if (e0.target.closest('.cx-menu')) return; // 菜单点击不触发拖动
-        const off = $panel.offset();
-        const dx = e0.clientX - off.left, dy = e0.clientY - off.top;
-        dragMoved = false;
-        const onMove = (e) => {
-          dragMoved = true;
-          const left = Math.min(Math.max(0, e.clientX - dx), window.innerWidth - 60);
-          const top = Math.min(Math.max(0, e.clientY - dy), window.innerHeight - 60);
-          $panel.css({ left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
-        };
-        const onUp = (e) => {
-          $(document).off('mousemove', onMove).off('mouseup', onUp);
-          if (dragMoved) {
-            const p = $panel.offset();
-            config.set('autocx.ballPos', { left: Math.round(p.left), top: Math.round(p.top) });
-          }
-        };
-        $(document).on('mousemove', onMove).on('mouseup', onUp);
-        e0.preventDefault();
-      });
+      const ballMoved = makeDraggable($ball);
+      makeDraggable($panel.find('.cx-head')); // 展开后拖头部移动窗口
+
+      const openPanel = () => { $panel.addClass('open'); setTimeout(clampIntoView, 50); };
       $ball.on('click', (e) => {
-        if (dragMoved || e.target.closest('.cx-menu')) return;
-        $panel.addClass('open');
+        if (ballMoved() || e.target.closest('.cx-menu')) return;
+        openPanel();
       });
       $panel.find('.cx-menu .mi').on('click', function (e) {
         e.stopPropagation();
         const act = $(this).data('act');
-        if (act === 'open') $panel.addClass('open');
+        if (act === 'open') openPanel();
         else if (act === 'toggle-video') toggleAssist('assist.video', '看课助手');
         else if (act === 'toggle-quiz') toggleAssist('assist.quiz', '答题助手');
         else if (act === 'toggle-main') { config.set('autocx.enabled', !isEnabled()); renderAssist(); renderSwitch(); }
       });
       $panel.find('.cx-close').on('click', () => $panel.removeClass('open'));
+      // 窗口尺寸变化时重新钳制,避免面板被挤出屏幕
+      window.addEventListener('resize', clampIntoView);
 
       // ---- 总开关 ----
       const $sw = $panel.find('.cx-enabled');
