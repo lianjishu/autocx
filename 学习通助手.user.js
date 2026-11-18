@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.5.0
+// @version      0.6.0
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -127,7 +127,8 @@
     if (/\/ananas\/modules\/(innertemplet|book|read)\//.test(path)) return 'book';
 
     // 章节测验/作业答卷页
-    if (/\/(mooc2?-ans\/)?(work|exam)\//.test(path) || /dowork|studentwork/.test(href)) return 'quiz';
+    if (/\/(mooc2?-ans\/)?(work|exam)\//.test(path) || /dowork|studentwork/.test(href) ||
+        /\/mooc-ans\/api\/work/.test(path)) return 'quiz';
 
     // 顶层帧: 本人窗口 且 是课程学习相关页
     if (window.top === window.self) {
@@ -183,7 +184,7 @@
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.1,
           }),
-          timeout: (opts && opts.timeout) || 30000,
+          timeout: (opts && opts.timeout) || 90000,
           onload(res) {
             try {
               if (res.status < 200 || res.status >= 300) {
@@ -516,29 +517,48 @@
       }
 
       let failStreak = 0;
-      for (const q of questions) {
-        if (!isEnabled()) break;
+      let stopped = false;
+
+      // 单题处理(含一次重试)
+      const answerOne = async (q) => {
+        if (stopped || !isEnabled()) return;
         setBadge(q, '思考中…', 'thinking');
-        try {
-          const raw = await llm.chat(buildPrompt(q), { timeout: 30000 });
-          failStreak = 0;
-          const parsed = parseAnswer(q, raw);
-          setBadge(q, `AI: ${parsed.display}`, parsed.ok ? 'ok' : 'bad');
-          log.info(module, `题目${q.index} AI回答: ${parsed.display}${parsed.ok ? '' : ' (解析失败,未作答)'}`);
-          if (parsed.ok && config.get('quiz.auto_fill')) fillAnswer(q, parsed);
-        } catch (e) {
-          failStreak++;
-          setBadge(q, '失败', 'bad');
-          log.warn(module, `题目${q.index} LLM 调用失败: ${e.message}`);
-          if (failStreak >= 3) {
-            log.error(module, '连续 3 题失败,暂停答题。请检查 LLM 配置。');
-            report(module, 'error', 'LLM 连续失败,已暂停');
-            break;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const raw = await llm.chat(buildPrompt(q), { timeout: 90000 });
+            failStreak = 0;
+            const parsed = parseAnswer(q, raw);
+            setBadge(q, `AI: ${parsed.display}`, parsed.ok ? 'ok' : 'bad');
+            log.info(module, `题目${q.index} AI回答: ${parsed.display}${parsed.ok ? '' : ' (解析失败,未作答)'}`);
+            if (parsed.ok && config.get('quiz.auto_fill')) fillAnswer(q, parsed);
+            return;
+          } catch (e) {
+            log.warn(module, `题目${q.index} 第${attempt}次调用失败: ${e.message}`);
           }
         }
+        failStreak++;
+        setBadge(q, '失败', 'bad');
+        if (failStreak >= 3) {
+          stopped = true;
+          log.error(module, '连续 3 题失败,暂停答题。请检查 LLM 配置。');
+          report(module, 'error', 'LLM 连续失败,已暂停');
+        }
+      };
+
+      // 2 路并发(保守:部分服务对并发限速)
+      const queue = [...questions];
+      const worker = async () => {
+        while (queue.length && !stopped) {
+          const q = queue.shift();
+          if (q) await answerOne(q);
+        }
+      };
+      await Promise.all([worker(), worker()]);
+
+      if (!stopped) {
+        log.info(module, '答题流程结束。请人工核对后自行提交(脚本不会自动提交)。');
+        report(module, 'filled', '答题完成,等待人工核对提交');
       }
-      log.info(module, '答题流程结束。请人工核对后自行提交(脚本不会自动提交)。');
-      report(module, 'filled', '答题完成,等待人工核对提交');
     }
 
     /* ---------- 题目提取:接口 JSON ---------- */
@@ -598,7 +618,7 @@
     /* ---------- Prompt 构建 ---------- */
     function buildPrompt(q) {
       const typeName = { single: '单选题', multi: '多选题', judge: '判断题', blank: '填空题' }[q.type];
-      let p = `请回答下面这道${typeName}。\n题目:${q.stem}\n`;
+      let p = `请回答下面这道${typeName}。\n注意:题目文本可能混有个别形近乱码字符(网站字体混淆所致),请结合上下文语义推断原题含义后作答。\n题目:${q.stem}\n`;
       if (q.type === 'judge' && !q.options.length) {
         p += 'A、正确\nB、错误\n';
       } else if (q.options.length) {
