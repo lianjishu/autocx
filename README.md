@@ -27,6 +27,8 @@
 | LLM Base URL | `https://api.deepseek.com/v1` | 任意 OpenAI 兼容接口 |
 | LLM API Key | 空 | 不填则测验只做题目提取，不答题 |
 | LLM 模型 | `deepseek-chat` | |
+| 思考强度 | `low` | 推理模型(deepseek-reasoner 等)必设 low,提速 10 倍;网关不认会自动降级 |
+| 单题超时 | 60s | 慢服务可调大 |
 | 视频倍速 | 2 | 1–16，建议 ≤4 降低风控概率 |
 | 视频静音 | 开 | |
 | 自动勾选答案 | 开 | 关闭则只看 AI 建议手动选 |
