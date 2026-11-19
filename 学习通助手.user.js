@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.9.0
-// @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题(人工确认提交)。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
+// @version      0.11.0
+// @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
+// @homepage     https://github.com/lianjishu/autocx
+// @supportURL   https://github.com/lianjishu/autocx/issues
 // @icon         https://pan-yz.chaoxing.com/favicon.ico
 // @match        *://*.chaoxing.com/*
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js
@@ -13,8 +15,11 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
 // @grant        GM_removeValueChangeListener
+// @grant        GM_registerMenuCommand
+// @grant        GM_setClipboard
 // @grant        GM_log
 // @grant        GM_addStyle
 // @grant        unsafeWindow
@@ -71,6 +76,15 @@
   };
 
   /* ============================== 配置 ===================================== */
+  // 作者仓库:元数据 @homepage 只能写一个(ScriptCat 取第一个命中的 key,重复行会触发校验错误),
+  // 所以镜像地址放在页面 UI 里。链接一律新标签打开,不带任何跟踪参数。
+  const REPO = {
+    github: 'https://github.com/lianjishu/autocx',
+    gitee: 'https://gitee.com/yake2024/autocx',
+    issues: 'https://github.com/lianjishu/autocx/issues',
+  };
+  const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '0.0.0';
+
   const DEFAULTS = {
     'autocx.enabled': true, // 总开关(面板启停)
     'assist.video': true,   // 看课助手(视频/文档任务点)
@@ -80,10 +94,12 @@
     'llm.model': 'deepseek-chat',
     'llm.effort': 'low',   // 思考强度: ''(不发送)/low/medium/high;推理模型建议 low 提速
     'llm.timeout': 180,    // 响应停滞超时(秒):N 秒完全无数据才判负;网关排队/缓冲/慢思考都覆盖
+    'llm.stream': true,    // 流式接收(思考/回答逐字进记录窗口);关掉=等整包返回再一次性展示
     'video.speed': 2,
     'video.mute': true,
     'quiz.auto_fill': true,
     'quiz.auto_submit': false, // 自动提交(仅全部答完才生效,默认关闭)
+    'quiz.double_check': true, // 两答一致性校验:同题问两遍,不一致标记存疑不填
     'doc.interval': 2,      // 翻页间隔基数(秒)
     'debug': false,
   };
@@ -134,8 +150,12 @@
     if (/\/ananas\/modules\/(innertemplet|book|read)\//.test(path)) return 'book';
 
     // 章节测验/作业答卷页
-    if (/\/(mooc2?-ans\/)?(work|exam)\//.test(path) || /dowork|studentwork/.test(href) ||
-        /\/mooc-ans\/api\/work/.test(path)) return 'quiz';
+    // 排除批阅/查看页(提交后跳转的 selectWorkQuestionYiPiYue 等):只读或复答草稿,
+    // 绝不能在上面提取/答题/点击
+    const REVIEW_URL = /YiPiYue|selectWorkQuestion|workView|reviewWork|viewWork/i;
+    if (!REVIEW_URL.test(href) &&
+        (/\/(mooc2?-ans\/)?(work|exam)\//.test(path) || /dowork|studentwork/.test(href) ||
+        /\/mooc-ans\/api\/work/.test(path))) return 'quiz';
 
     // 顶层帧: 本人窗口 且 是课程学习相关页
     if (window.top === window.self) {
@@ -159,9 +179,340 @@
     });
   }
 
+  /* ============================== 作答记录总线 ============================= */
+  /** HTML 转义:模型输出是不可信数据,一律转义后再进 DOM */
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+  // quiz 帧跑模型、顶层帧画窗口:用 GM 存储当通道,不手写 postMessage 协议。
+  // 本帧写入直接派发给本帧订阅者;跨帧写入靠 GM_addValueChangeListener(remote=true)。
+  const AI_INDEX = 'autocx.ai.index';
+  const AI_KEEP = 3;                       // 最多保留几份会话(按最近使用 LRU)
+  const AI_PING = 'autocx.ai.ping';         // 面板页签用的轻量摘要(不重复传题目文本)
+  const AI_S = (sid) => 'autocx.ai.s.' + sid;
+  const AI_C = (sid, n) => 'autocx.ai.c.' + sid + '.' + n;
+
+  const aibus = {
+    _subs: new Map(),
+    _subscribe(key, fn) {
+      if (!this._subs.has(key)) this._subs.set(key, []);
+      this._subs.get(key).push(fn);
+      return () => {
+        const list = this._subs.get(key) || [];
+        const i = list.indexOf(fn);
+        if (i >= 0) list.splice(i, 1);
+        if (!list.length) this._subs.delete(key);
+      };
+    },
+    /** 订阅一个键:本帧写入与跨帧写入都会回调 */
+    on(key, fn) {
+      const off = this._subscribe(key, fn);
+      const id = GM_addValueChangeListener(key, (_k, _o, nv, remote) => {
+        if (remote) { try { fn(nv); } catch (_) { /* 渲染异常不能影响数据流 */ } }
+      });
+      return () => {
+        off();
+        try { GM_removeValueChangeListener(id); } catch (_) { /* 监听器已失效 */ }
+      };
+    },
+    /** 落盘 + 通知本帧订阅者 */
+    put(key, value) {
+      try { GM_setValue(key, value); } catch (e) { log.warn('ai', '记录写入失败: ' + e.message); }
+      const list = this._subs.get(key);
+      if (list) list.slice().forEach((fn) => { try { fn(value); } catch (_) { /* 同上 */ } });
+    },
+    /** 会话索引:新的排最前,超出上限的老会话连同题目键一起删掉 */
+    touchIndex(meta) {
+      let idx = [];
+      try { idx = GM_getValue(AI_INDEX) || []; } catch (_) { idx = []; }
+      if (!Array.isArray(idx)) idx = [];
+      const item = {
+        sid: meta.sid, title: meta.title || '', count: meta.count || 0,
+        ts: meta.startAt || Date.now(),
+      };
+      const rest = idx.filter((it) => it && it.sid !== item.sid);
+      rest.unshift(item);
+      this.put(AI_INDEX, rest.slice(0, AI_KEEP));
+      rest.slice(AI_KEEP).forEach((it) => { try { this.drop(it.sid, it.count); } catch (_) { /* 忽略 */ } });
+    },
+    drop(sid, count) {
+      try { GM_deleteValue(AI_S(sid)); } catch (_) { /* 忽略 */ }
+      const n = Math.max(1, Math.min(50, Number(count) || 20));
+      for (let i = 1; i <= n; i++) { try { GM_deleteValue(AI_C(sid, i)); } catch (_) { /* 忽略 */ } }
+    },
+  };
+
+  /** 内部题对象 -> 可写进 GM 的纯数据(去掉 DOM 引用,文本截断防膨胀) */
+  function convSnapshot(c) {
+    return {
+      n: c.index,
+      type: c.type || '',
+      stem: String(c.stem || '').slice(0, 800),
+      options: (c.options || []).slice(0, 12).map((op) => ({
+        label: String(op.label || ''), text: String(op.text || '').slice(0, 300),
+      })),
+      source: c.source || '',
+      phase: c.phase || 'queued',
+      prompt: String(c.prompt || '').slice(0, 4000),
+      params: c.params || null,
+      thinking: String(c.thinking || '').slice(-12000),
+      answer: String(c.answer || '').slice(-4000),
+      streamed: c.streamed !== false,
+      result: c.result || null,
+      usage: c.usage || null,
+      error: c.error || null,
+      attempt: c.attempt || 1,
+      t: c.t || null,
+    };
+  }
+
+  /** 单题写盘节流:流式增量每 300ms 最多一次,相位变化走 immediate */
+  function makeConvWriter(sid, index) {
+    const key = AI_C(sid, index);
+    let timer = null;
+    let pending = null;
+    let lastAt = 0;
+    const flush = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (!pending) return;
+      lastAt = Date.now();
+      aibus.put(key, pending);
+      pending = null;
+    };
+    return {
+      write(snap, immediate) {
+        pending = snap;
+        const now = Date.now();
+        if (immediate || now - lastAt >= 300) { flush(); return; }
+        if (!timer) timer = setTimeout(flush, 300 - (now - lastAt));
+      },
+      flush,
+    };
+  }
+
   /* ============================== 总开关 =================================== */
   function isEnabled() {
     return config.get('autocx.enabled') !== false;
+  }
+
+  /* ============================== SSE 增量解析 ============================= */
+  // 把 SSE 文本切成事件,拆出 思考(reasoning_content)/回答(content)/usage。
+  // 刻意保持纯函数(不碰 DOM、不碰 GM):test/sse-parse.test.js 会抽取它做回归。
+  function makeSseParser(handlers) {
+    const h = handlers || {};
+    let buf = '';
+    let doneSeen = false;
+    const emit = (fn, arg) => { if (typeof fn === 'function') fn(arg); };
+
+    function handleLine(raw) {
+      const line = String(raw == null ? '' : raw).replace(/\r$/, '');
+      if (!line || line.charAt(0) === ':') return;        // 空行 / ": keep-alive" 心跳
+      if (line.slice(0, 5) !== 'data:') return;           // event: / id: / retry: 一律忽略
+      const payload = line.slice(5).trim();
+      if (!payload) return;
+      if (payload === '[DONE]') { doneSeen = true; emit(h.done); return; }
+      let json;
+      try { json = JSON.parse(payload); } catch (_) { return; }  // 非 JSON 心跳 / 半行
+      if (!json || typeof json !== 'object') return;
+      if (json.usage) emit(h.usage, json.usage);
+      if (json.error) emit(h.error, json.error);
+      const choice = json.choices && json.choices[0];
+      if (!choice) return;
+      const d = choice.delta || {};
+      const thinkDelta = d.reasoning_content || d.reasoning;
+      if (thinkDelta) emit(h.thinking, thinkDelta);
+      if (d.content) emit(h.answer, d.content);
+      const m = choice.message;                                   // 网关把整包塞进一条 SSE
+      if (m) {
+        const mThink = m.reasoning_content || m.reasoning;
+        if (mThink) emit(h.thinking, mThink);
+        if (m.content) emit(h.answer, m.content);
+      }
+      if (choice.finish_reason) emit(h.finish, choice.finish_reason);
+    }
+
+    return {
+      /** 喂一段新到达的文本(允许半个事件) */
+      feed(chunk) {
+        if (!chunk) return;
+        buf += chunk;
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          handleLine(buf.slice(0, idx));
+          buf = buf.slice(idx + 1);
+        }
+      },
+      /** 流结束:冲刷残留末行 */
+      end() {
+        if (buf.trim()) handleLine(buf);
+        buf = '';
+      },
+      get doneSeen() { return doneSeen; },
+    };
+  }
+
+  /* ============================== 流式对话 ================================= */
+  // 与 llm.chat 的区别:边收边解析,思考与回答分别回调。
+  // 拿不到增量(网关忽略 stream / 传输层不吐半包)时自动降级为整包解析,st.streamed=false。
+  // 永不 throw:失败走 promise reject,句柄支持 abort。
+  function openChatStream(prompt, opts) {
+    const o = opts || {};
+    const st = {
+      thinking: '', answer: '', usage: null, finish: '',
+      streamed: false, incremental: false, chunks: 0, bytes: 0, aborted: false,
+      tStart: Date.now(), tFirstByte: 0, tFirstThink: 0, tFirstAnswer: 0, tDone: 0,
+    };
+    const phase = (name, info) => { try { if (o.onPhase) o.onPhase(name, info || st); } catch (_) {} };
+    let handle = null;
+    let settled = false;
+    let settleFn = null;
+    let lastActivity = Date.now();
+    let idleTimer = null;
+
+    const promise = new Promise((resolve, reject) => {
+      settleFn = (kind, payload) => {
+        if (settled) return;
+        settled = true;
+        if (idleTimer) clearInterval(idleTimer);
+        settleFn = null;
+        if (kind === 'reject') reject(payload); else resolve(payload);
+      };
+      const fail = (e) => {
+        phase('error', { message: (e && e.message) || String(e) });
+        if (settleFn) settleFn('reject', e);
+      };
+      const ok = () => {
+        st.tDone = Date.now();
+        phase('done', st);
+        if (settleFn) settleFn('ok', st);
+      };
+
+      const base = String(config.get('llm.base_url')).replace(/\/+$/, '');
+      const apiKey = config.get('llm.api_key');
+      const model = config.get('llm.model');
+      const effort = String(config.get('llm.effort') || '').trim();
+      const idleMs = o.idleTimeout || (Math.max(15, Number(config.get('llm.timeout')) || 60) * 1000);
+      if (!apiKey) return fail(new Error('未配置 llm.api_key'));
+
+      // 停滞看门狗:任何字节到达都算活跃,思考再久也不算失败
+      idleTimer = setInterval(() => {
+        if (Date.now() - lastActivity > idleMs) {
+          fail(new Error(`响应停滞(>${Math.round(idleMs / 1000)}s 无数据)`));
+        }
+      }, 5000);
+
+      const handlers = {
+        thinking(t) {
+          if (!st.tFirstThink) { st.tFirstThink = Date.now(); phase('thinking'); }
+          st.thinking += t;
+          st.chunks++;
+          try { if (o.onThinking) o.onThinking(t, st); } catch (_) { /* 回调异常不影响流 */ }
+        },
+        answer(t) {
+          if (!st.tFirstAnswer) { st.tFirstAnswer = Date.now(); phase('answering'); }
+          st.answer += t;
+          st.chunks++;
+          try { if (o.onAnswer) o.onAnswer(t, st); } catch (_) { /* 同上 */ }
+        },
+        usage(u) { st.usage = u; },
+        finish(f) { st.finish = f; },
+        done() { /* [DONE] 只是结束标记 */ },
+      };
+
+      let consumed = 0;
+      let parser = makeSseParser(handlers);
+
+      const send = (withEffort) => {
+        const body = {
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+          stream: true,
+        };
+        if (withEffort && effort) body.reasoning_effort = effort;
+        consumed = 0;
+        parser = makeSseParser(handlers);
+        lastActivity = Date.now();
+        phase('requesting', { model, effort: withEffort ? effort : '', stream: true });
+        try {
+          handle = GM_xmlhttpRequest({
+            method: 'POST',
+            url: base + '/chat/completions',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ' + apiKey,
+              'Accept': 'text/event-stream',
+            },
+            data: JSON.stringify(body),
+            timeout: 15 * 60 * 1000, // 硬顶防死挂;思考再久也等
+            onreadystatechange(res) {
+              if (!res || res.readyState < 3) return;
+              lastActivity = Date.now();
+              const txt = res.responseText;
+              if (typeof txt !== 'string' || txt.length <= consumed) return;
+              if (!st.tFirstByte) st.tFirstByte = Date.now();
+              if (!st.incremental) { st.incremental = true; st.streamed = true; phase('stream'); }
+              st.bytes = txt.length;
+              parser.feed(txt.slice(consumed));
+              consumed = txt.length;
+            },
+            onload(res) {
+              lastActivity = Date.now();
+              try {
+                const txt = typeof res.responseText === 'string' ? res.responseText : '';
+                // 网关/模型不认 reasoning_effort:去掉参数重试一次
+                if (res.status === 400 && withEffort && effort &&
+                    /reasoning|effort|unknown|invalid/i.test(txt)) {
+                  phase('retry', { reason: '网关不支持 reasoning_effort,已改用默认参数' });
+                  return send(false);
+                }
+                if (res.status < 200 || res.status >= 300) {
+                  return fail(new Error(`HTTP ${res.status}: ${String(txt).slice(0, 200)}`));
+                }
+                if (txt.length > consumed) { parser.feed(txt.slice(consumed)); consumed = txt.length; }
+                parser.end();
+                // 1) 增量一个事件都没拿到 -> 整包按 SSE 再解一遍(网关忽略 stream 的情形)
+                if (!st.thinking && !st.answer) {
+                  st.streamed = false;
+                  const p2 = makeSseParser(handlers);
+                  p2.feed(txt);
+                  p2.end();
+                }
+                // 2) 连 SSE 都不是 -> 普通 JSON 兜底
+                if (!st.thinking && !st.answer) {
+                  const data = JSON.parse(txt);
+                  if (data && data.usage) st.usage = data.usage;
+                  const msg = data && data.choices && data.choices[0] && data.choices[0].message;
+                  if (msg) {
+                    const mThink = msg.reasoning_content || msg.reasoning;
+                    if (mThink) handlers.thinking(mThink);
+                    if (msg.content) handlers.answer(msg.content);
+                  }
+                }
+                if (!st.thinking && !st.answer) return fail(new Error('响应中无可用内容'));
+                ok();
+              } catch (e) { fail(e); }
+            },
+            onerror(e) { fail(new Error('网络错误: ' + ((e && e.error) || 'unknown'))); },
+            ontimeout() { fail(new Error('请求总时长超 15 分钟,已中止')); },
+            onabort() { fail(new Error('已中止')); },
+          });
+        } catch (e) { fail(e); }
+      };
+
+      send(true);
+    });
+
+    return {
+      promise,
+      abort() {
+        st.aborted = true;
+        try { if (handle && handle.abort) handle.abort(); } catch (_) { /* 句柄已失效 */ }
+        if (settleFn) settleFn('reject', new Error('已中止'));
+      },
+    };
   }
 
   /* ============================== LLM 模块 ================================= */
@@ -262,11 +613,706 @@
       });
       return send(true);
     },
-    /** 面板"测试连接"按钮用 */
+    /**
+     * 流式对话(作答记录窗口用)。返回 {promise, abort()}。
+     * promise 解析为 {thinking, answer, usage, streamed, chunks, tStart, tDone};失败 reject。
+     * @param {string} prompt
+     * @param {{onPhase?:function,onThinking?:function,onAnswer?:function,idleTimeout?:number}} [opts]
+     */
+    stream(prompt, opts) {
+      // llm.stream=false:复用非流式的 chat(),一次性给出完整文本(并诚实标记 streamed:false)
+      if (config.get('llm.stream') === false) {
+        const o = opts || {};
+        const st = { thinking: '', answer: '', usage: null, streamed: false, chunks: 0, tStart: Date.now(), tDone: 0 };
+        try { if (o.onPhase) o.onPhase('requesting', st); } catch (_) { /* 回调异常不影响主流程 */ }
+        const promise = this.chat(prompt, o).then((text) => {
+          st.answer = text;
+          st.tDone = Date.now();
+          try { if (o.onAnswer) o.onAnswer(text, st); } catch (_) { /* 同上 */ }
+          try { if (o.onPhase) o.onPhase('done', st); } catch (_) { /* 同上 */ }
+          return st;
+        });
+        return { promise, abort() {} };
+      }
+      return openChatStream(prompt, opts);
+    },
+    /** 面板"测试连接"按钮用;顺带报告这次是真流式还是整包返回 */
     test() {
-      return this.chat('请只回复两个字:正常').then((t) => `连接成功,模型回复: ${t.slice(0, 50)}`);
+      const t0 = Date.now();
+      return this.stream('请只回复两个字:正常', {}).promise.then((st) => {
+        const ms = (st.tDone || Date.now()) - t0;
+        const mode = st.streamed ? `流式 ✓ ${st.chunks} 片` : '非流式(整包返回)';
+        const reply = String(st.answer || st.thinking || '').replace(/\s+/g, ' ').slice(0, 40);
+        return `连接成功 · ${mode} · ${(ms / 1000).toFixed(1)}s · 回复: ${reply}`;
+      });
     },
   };
+
+  /* ============================== AI 作答记录窗口 =========================== */
+  // 只读窗口:脚本请求 → 模型思考 → 模型回答 → 解析/勾选/校验 → 提交轨迹。
+  // 顶层帧挂载;若某帧自己就是顶层(单独打开答卷页),也在本帧挂载。
+  // 模型输出是不可信数据:一律 esc() 转义后写入 DOM,绝不拼原始 HTML。
+  const AIW = {
+    api: null,
+    ensure() {
+      if (!this.api) this.api = createAIWindow();
+      return this.api;
+    },
+  };
+
+  function createAIWindow() {
+    GM_addStyle(`
+      #autocx-ai{position:fixed;inset:0;z-index:2147483647;pointer-events:none}
+      #autocx-ai .cxai-win{position:fixed;display:none;flex-direction:column;
+        width:900px;height:640px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);
+        background:#fff;border-radius:14px;overflow:hidden;pointer-events:auto;
+        border:1px solid rgba(229,231,235,.9);
+        box-shadow:0 2px 4px rgba(17,24,39,.05),0 22px 60px rgba(17,24,39,.22);
+        font:13px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:#111827}
+      #autocx-ai.open .cxai-win{display:flex}
+      /* 头部 */
+      #autocx-ai .cxai-bar{flex:none;height:52px;display:flex;align-items:center;gap:10px;padding:0 12px 0 14px;
+        border-bottom:1px solid #E8ECF3;background:linear-gradient(180deg,#fff,#FCFDFF);cursor:grab;user-select:none}
+      #autocx-ai .cxai-bar:active{cursor:grabbing}
+      #autocx-ai .cxai-logo{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+        color:#fff;font-weight:700;font-size:11.5px;letter-spacing:.4px;
+        background:linear-gradient(140deg,#3B7CFF,#6FA8FF);box-shadow:0 3px 10px rgba(59,124,255,.32)}
+      #autocx-ai .cxai-titles{min-width:0}
+      #autocx-ai .cxai-titles h1{font-size:13.5px;font-weight:650;letter-spacing:.1px;margin:0}
+      #autocx-ai .cxai-titles p{font-size:11px;color:#98A1B0;margin:1px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px}
+      #autocx-ai .cxai-grow{flex:1}
+      #autocx-ai .cxai-pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid #E8ECF3;
+        color:#4B5563;background:#FBFCFE;white-space:nowrap;font-family:Consolas,monospace}
+      #autocx-ai .cxai-pill:empty{display:none}
+      #autocx-ai .cx-model{max-width:230px;overflow:hidden;text-overflow:ellipsis}
+      #autocx-ai .cxai-icon{width:26px;height:26px;border-radius:7px;border:1px solid transparent;background:none;
+        color:#8A94A6;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center}
+      #autocx-ai .cxai-icon:hover{background:#F2F5FA;border-color:#E8ECF3;color:#4B5563}
+      /* 主体 */
+      #autocx-ai .cxai-body{flex:1;display:flex;min-height:0}
+      #autocx-ai .cxai-rail{width:224px;flex:none;background:#F7F9FC;border-right:1px solid #E8ECF3;
+        display:flex;flex-direction:column;min-height:0}
+      #autocx-ai .cxai-rail-head{padding:12px 14px 8px;display:flex;align-items:center;justify-content:space-between}
+      #autocx-ai .cxai-rail-head b{font-size:11.5px;color:#4B5563;font-weight:600}
+      #autocx-ai .cxai-rail-head span{font-size:11px;color:#98A1B0}
+      #autocx-ai .cxai-items{flex:1;overflow:auto;padding:2px 8px 8px}
+      #autocx-ai .cxai-item{display:flex;gap:9px;padding:9px 10px;border-radius:10px;cursor:pointer}
+      #autocx-ai .cxai-item+.cxai-item{margin-top:2px}
+      #autocx-ai .cxai-item:hover{background:#EFF3FA}
+      #autocx-ai .cxai-item.on{background:#fff;box-shadow:0 1px 2px rgba(17,24,39,.05),0 0 0 1px #E6ECF6}
+      #autocx-ai .cxai-item .n{font:10.5px Consolas,monospace;color:#9AA5B6;width:16px;flex:none;padding-top:2px}
+      #autocx-ai .cxai-item.on .n{color:#3B7CFF}
+      #autocx-ai .cxai-item .tx{min-width:0;flex:1}
+      #autocx-ai .cxai-item .q{font-size:12px;color:#374151;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      #autocx-ai .cxai-item .st{display:flex;align-items:center;gap:5px;margin-top:3px;font-size:10.5px;color:#98A1B0}
+      #autocx-ai .cxai-dot{width:6px;height:6px;border-radius:50%;background:#CBD3DF;flex:none}
+      #autocx-ai .cxai-dot.ok{background:#22C55E}
+      #autocx-ai .cxai-dot.live{background:#7C5CE0;animation:cxai-pulse 1.4s infinite}
+      #autocx-ai .cxai-dot.bad{background:#EF4444}
+      @keyframes cxai-pulse{0%,100%{box-shadow:0 0 0 0 rgba(124,92,224,.45)}50%{box-shadow:0 0 0 4px rgba(124,92,224,0)}}
+      #autocx-ai .cxai-rail-foot{flex:none;border-top:1px solid #E8ECF3;padding:10px 14px 12px;background:#FBFCFE}
+      #autocx-ai .cxai-rail-foot p{font-size:10.5px;color:#98A1B0;display:flex;justify-content:space-between;margin:0}
+      #autocx-ai .cxai-rail-foot p b{color:#4B5563;font-weight:600}
+      #autocx-ai .cxai-meter{height:4px;border-radius:2px;background:#E7ECF4;overflow:hidden;margin:7px 0 6px}
+      #autocx-ai .cxai-meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,#3B7CFF,#7FA9FF);transition:width .3s}
+      /* 主线程 */
+      #autocx-ai .cxai-main{flex:1;display:flex;flex-direction:column;min-width:0;background:#fff}
+      #autocx-ai .cxai-session{flex:none;display:flex;align-items:center;gap:7px;flex-wrap:wrap;
+        padding:11px 22px 10px;font-size:11px;color:#94A0B2;border-bottom:1px solid #F1F4F9}
+      #autocx-ai .cxai-session:empty{display:none}
+      #autocx-ai .cxai-session .k{color:#5B6678}
+      #autocx-ai .cxai-session .m{font-family:Consolas,monospace;font-size:10.5px;color:#AAB3C0}
+      #autocx-ai .cxai-sm{font-size:10.5px;padding:1px 7px;border-radius:5px;background:#F1F4F9;color:#64748B}
+      #autocx-ai .cxai-thread{flex:1;overflow:auto;padding:16px 22px 6px}
+      #autocx-ai .cxai-empty{color:#A9B3C2;font-size:12.5px;line-height:1.9;padding:8px 0}
+      #autocx-ai .cxai-turn{padding-bottom:16px}
+      #autocx-ai .cxai-turn+.cxai-turn{border-top:1px dashed #F1F4F9;padding-top:16px}
+      #autocx-ai .cxai-turn-head{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+      #autocx-ai .cxai-idx{font:11px Consolas,monospace;color:#fff;background:#3B7CFF;border-radius:5px;padding:1px 6px}
+      #autocx-ai .cxai-q{font-size:12.5px;color:#374151;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      #autocx-ai .cxai-chip{font-size:10.5px;padding:1px 7px;border-radius:5px;background:#F1F4F9;color:#64748B;white-space:nowrap}
+      #autocx-ai .cxai-chip.v{background:#F6F3FF;color:#6D49D6}
+      /* 已完成轮次:一行回执 */
+      #autocx-ai .cxai-receipt{display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid #E8ECF3;
+        border-radius:10px;background:#FCFDFF;cursor:pointer}
+      #autocx-ai .cxai-receipt:hover{background:#F7F9FD;border-color:#DDE5F1}
+      #autocx-ai .cxai-receipt .cxai-idx{background:#94A3B8}
+      #autocx-ai .cxai-receipt .q{font-size:12px;color:#4B5563;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      #autocx-ai .cxai-key{font:600 12px Consolas,monospace;color:#fff;background:#111827;border-radius:5px;padding:1px 8px;letter-spacing:1px}
+      #autocx-ai .cxai-key.ok{background:#15803D}
+      #autocx-ai .cxai-key.bad{background:#B91C1C}
+      #autocx-ai .cxai-okn{font-size:11px;color:#15803D;white-space:nowrap}
+      #autocx-ai .cxai-badn{font-size:11px;color:#B91C1C;white-space:nowrap}
+      #autocx-ai .cxai-m{font-family:Consolas,monospace;font-size:10.5px;color:#AAB3C0;white-space:nowrap}
+      #autocx-ai .cxai-caret-r{color:#A9B3C2;font-size:10px;transform:rotate(90deg);display:inline-block}
+      /* 请求块 */
+      #autocx-ai .cxai-req{border:1px solid #E8ECF3;border-radius:10px;background:#FCFDFF;overflow:hidden;margin-bottom:10px}
+      #autocx-ai .cxai-req-row{display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:11.5px;color:#5B6678;cursor:pointer}
+      #autocx-ai .cxai-req-row .who{color:#334155}
+      #autocx-ai .cxai-req-row .arrow{color:#3B7CFF;font-weight:600}
+      #autocx-ai .cxai-req-body{border-top:1px solid #F1F4F9;padding:10px 12px;background:#fff;display:none}
+      #autocx-ai .cxai-req.open .cxai-req-body{display:block}
+      #autocx-ai .cxai-req-body pre{font:11px/1.6 Consolas,monospace;color:#4B5563;white-space:pre-wrap;word-break:break-word;margin:0}
+      #autocx-ai .cxai-tags{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+      /* 思考块 */
+      #autocx-ai .cxai-think{border-left:2px solid #D9CCFA;background:linear-gradient(180deg,#FAF8FF,#FEFDFF);
+        border-radius:0 10px 10px 0;padding:9px 12px 10px;margin-bottom:10px}
+      #autocx-ai .cxai-think-head{display:flex;align-items:center;gap:7px;font-size:11.5px;color:#6D49D6;margin-bottom:5px}
+      #autocx-ai .cxai-think-head .lbl{font-weight:600}
+      #autocx-ai .cxai-think-head .time{font-family:Consolas,monospace;font-size:10.5px;color:#A78BFA}
+      #autocx-ai .cxai-think-body{font-size:12px;line-height:1.7;color:#5B5470;white-space:pre-wrap;word-break:break-word;margin:0}
+      #autocx-ai .cxai-think.collapsed .cxai-think-body{display:none}
+      #autocx-ai .cxai-think-head{cursor:pointer}
+      #autocx-ai .cxai-cursor{display:inline-block;width:6px;height:13px;background:#8B5CF6;vertical-align:-2px;margin-left:2px;
+        border-radius:1px;animation:cxai-blink 1s steps(2) infinite}
+      @keyframes cxai-blink{50%{opacity:0}}
+      @media (prefers-reduced-motion:reduce){#autocx-ai .cxai-cursor,#autocx-ai .cxai-dot.live{animation:none}}
+      /* 回答块 */
+      #autocx-ai .cxai-ans{border:1px solid #E8ECF3;border-radius:10px;padding:10px 12px 11px;background:#fff}
+      #autocx-ai .cxai-ans-head{display:flex;align-items:center;gap:7px;font-size:11.5px;color:#64748B;margin-bottom:6px}
+      #autocx-ai .cxai-ans-head .lbl{font-weight:600;color:#334155}
+      #autocx-ai .cxai-ans-head .time{font-family:Consolas,monospace;font-size:10.5px;color:#AAB3C0}
+      #autocx-ai .cxai-ans-body{font-size:13px;line-height:1.75;color:#1F2937;white-space:pre-wrap;word-break:break-word;margin:0}
+      #autocx-ai .cxai-ans-body.pending{color:#A9B3C2;font-size:12.5px}
+      #autocx-ai .cxai-verdict{display:flex;align-items:center;gap:7px;margin-top:9px;padding-top:9px;
+        border-top:1px dashed #F1F4F9;flex-wrap:wrap;font-size:11.5px;color:#64748B}
+      #autocx-ai .cxai-sep{width:1px;height:12px;background:#E8ECF3}
+      #autocx-ai .cxai-foot2{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:10.5px;color:#A9B3C2}
+      #autocx-ai .cxai-foot2 .acts{margin-left:auto;display:flex;gap:4px}
+      #autocx-ai .cxai-foot2 button{font:11px inherit;color:#7C8798;background:none;border:1px solid transparent;
+        border-radius:6px;padding:2px 7px;cursor:pointer}
+      #autocx-ai .cxai-foot2 button:hover{background:#F3F6FA;border-color:#E8ECF3;color:#475569}
+      /* 错误 / 提交事件 */
+      #autocx-ai .cxai-err{border:1px solid #FCE4E4;background:#FEF7F7;border-radius:10px;padding:10px 12px;
+        font-size:12px;color:#B91C1C;line-height:1.7}
+      #autocx-ai .cxai-err b{color:#991B1B}
+      #autocx-ai .cxai-submit-card{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:10px;
+        background:linear-gradient(180deg,#FFFCF5,#FEF8EC);border:1px solid #F2E6CC;font-size:11.5px;color:#8A6A2F}
+      #autocx-ai .cxai-submit-card b{color:#B45309}
+      #autocx-ai .cxai-submit-card ul{margin:4px 0 0;padding-left:16px}
+      /* 底部 */
+      #autocx-ai .cxai-note{flex:none;display:flex;align-items:center;gap:6px;border-top:1px solid #E8ECF3;
+        padding:9px 20px;background:#FCFDFF;font-size:10.5px;color:#A9B3C2}
+      #autocx-ai .cxai-note b{color:#7C8798;font-weight:600;letter-spacing:.2px;margin-right:2px}
+      #autocx-ai .cxai-note-r{margin-left:auto;color:#B6BFCC;white-space:nowrap}
+      #autocx-ai .cxai-note-r a{color:#8A94A6;text-decoration:none}
+      #autocx-ai .cxai-note-r a:hover{color:#3B7CFF;text-decoration:underline}
+      #autocx-ai .cxai-status{flex:none;display:flex;align-items:center;gap:9px;padding:9px 16px;
+        border-top:1px solid #F2E6CC;background:linear-gradient(180deg,#FFFCF5,#FEF8EC);font-size:11px;color:#8A6A2F}
+      #autocx-ai .cxai-status b{color:#B45309;font-weight:600}
+      #autocx-ai .cxai-status .right{margin-left:auto;display:flex;align-items:center;gap:8px;color:#8B9099}
+      #autocx-ai .cxai-status .right .cxai-sm{background:#EAF1FF;color:#2E6BD6}
+    `);
+
+    const esc = escHtml; // 本模块内的简写
+    const pad2 = (n) => (n < 10 ? '0' + n : '' + n);
+    const sec = (ts) => (ts ? new Date(ts).toTimeString().slice(0, 8) : '');
+    const dur = (ms) => {
+      if (!ms || ms < 0) return '';
+      return ms < 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms / 100) / 10 + 's';
+    };
+    const TYPE = { single: '单选', multi: '多选', judge: '判断', blank: '填空' };
+    const LIVE = { queued: 1, requesting: 1, thinking: 1, answering: 1 };
+    const state = {
+      sid: null, meta: null, convs: new Map(), order: [],
+      offs: [], submitEvents: [], openReq: new Set(), openTurn: new Set(),
+      pinned: true, raf: 0,
+    };
+
+    const $win = $(`<div id="autocx-ai"><div class="cxai-win">
+      <header class="cxai-bar">
+        <div class="cxai-logo">CX</div>
+        <div class="cxai-titles"><h1>AI 作答记录</h1><p class="cxai-sub">等待测验…</p></div>
+        <div class="cxai-grow"></div>
+        <span class="cxai-pill cx-model"></span>
+        <span class="cxai-pill cx-effort"></span>
+        <button class="cxai-icon" data-a="copy" title="复制全部记录">⧉</button>
+        <button class="cxai-icon" data-a="close" title="关闭 (Esc)">×</button>
+      </header>
+      <div class="cxai-body">
+        <aside class="cxai-rail">
+          <div class="cxai-rail-head"><b>本次测验</b><span class="cxai-rail-meta"></span></div>
+          <div class="cxai-items"></div>
+          <div class="cxai-rail-foot">
+            <p><span>已答</span><b class="cxai-done">0 / 0</b></p>
+            <div class="cxai-meter"><i></i></div>
+            <p><span class="cxai-left">等待开始</span><b class="cxai-fail"></b></p>
+          </div>
+        </aside>
+        <main class="cxai-main">
+          <div class="cxai-session"></div>
+          <div class="cxai-thread"><div class="cxai-empty">还没有记录。<br>测验页开始答题后,脚本发出的每一次请求都会出现在这里。</div></div>
+          <div class="cxai-note"><b>只读记录</b>不提供输入、不改答案;模型输出按纯文本转义展示。
+            <span class="cxai-note-r">AutoCX v${VERSION} · <a href="${REPO.github}" target="_blank" rel="noopener noreferrer">仓库</a></span></div>
+        </main>
+      </div>
+      <footer class="cxai-status">
+        <span class="cxai-submit"></span>
+        <span class="right"><span class="cxai-pill cx-key"></span><span class="cxai-pill cx-host"></span></span>
+      </footer>
+    </div></div>`);
+    $(document.body || document.documentElement).append($win);
+
+    /* ---------- 订阅与数据 ---------- */
+    const safeGet = (k) => { try { return GM_getValue(k); } catch (_) { return undefined; } };
+
+    function unbind() {
+      state.offs.forEach((off) => { try { off(); } catch (_) { /* 忽略 */ } });
+      state.offs = [];
+      state.convs.clear();
+      state.order = [];
+    }
+
+    function bind(sid) {
+      if (state.sid === sid) return;
+      unbind();
+      state.sid = sid;
+      state.meta = null;
+      state.submitEvents = [];
+      if (!sid) { draw(); return; }
+      const meta = safeGet(AI_S(sid));
+      state.offs.push(aibus.on(AI_S(sid), (m) => { if (m) applyMeta(m); }));
+      if (meta) applyMeta(meta);
+      draw();
+    }
+
+    function applyMeta(meta) {
+      state.meta = meta;
+      state.submitEvents = Array.isArray(meta.events) ? meta.events.slice() : [];
+      const count = Number(meta.count) || 0;
+      const bound = new Set(state.order);
+      for (let i = 1; i <= count; i++) {
+        const n = i;
+        if (bound.has(n)) continue;
+        const cur = safeGet(AI_C(state.sid, n));
+        if (cur) {
+          state.convs.set(n, cur);
+          if (!state.order.includes(n)) state.order.push(n);
+        }
+        state.offs.push(aibus.on(AI_C(state.sid, n), (v) => { if (v) { state.convs.set(n, v); upsertOrder(n); schedule(); } }));
+      }
+      state.order.sort((a, b) => a - b);
+      schedule();
+    }
+
+    function upsertOrder(n) {
+      if (!state.order.includes(n)) { state.order.push(n); state.order.sort((a, b) => a - b); }
+    }
+
+    function schedule() {
+      if (state.raf || !$win.hasClass('open')) return;
+      state.raf = requestAnimationFrame(() => { state.raf = 0; draw(); });
+    }
+
+    /* ---------- 渲染 ---------- */
+    function phaseInfo(c) {
+      const t = c.t || {};
+      const now = Date.now();
+      if (c.phase === 'queued') return { dot: '', text: '排队中' };
+      if (c.phase === 'requesting') return { dot: 'live', text: '请求中 · ' + dur(now - (t.reqAt || now)) };
+      if (c.phase === 'thinking') return { dot: 'live', text: '思考中 · ' + dur(now - (t.reqAt || now)) };
+      if (c.phase === 'answering') return { dot: 'live', text: '回答中 · ' + dur(now - (t.reqAt || now)) };
+      if (c.phase === 'parsed') return { dot: 'live', text: '已解析 · ' + (c.result && c.result.display || '') };
+      if (c.phase === 'filled') return { dot: 'ok', text: '已完成 · ' + (c.result && c.result.display || '') + (c.result && c.result.fillOk ? ' · 已勾选' : '') };
+      if (c.phase === 'failed') return { dot: 'bad', text: '失败' + (c.error && c.error.message ? ' · ' + String(c.error.message).slice(0, 18) : '') };
+      return { dot: '', text: c.phase || '' };
+    }
+
+    function draw() {
+      drawHeader();
+      drawRail();
+      drawSession();
+      drawThread();
+      drawStatus();
+    }
+
+    function drawHeader() {
+      const m = state.meta || {};
+      $win.find('.cxai-sub').text(m.title || '等待测验…');
+      $win.find('.cx-model').text(m.model || '');
+      $win.find('.cx-effort').text(m.effort ? 'effort ' + m.effort : '');
+      $win.find('.cx-key').text(m.keyTail ? '密钥 ●●●●' + m.keyTail : '');
+      $win.find('.cx-host').text(m.host || '');
+    }
+
+    function drawRail() {
+      const total = (state.meta && state.meta.count) || state.order.length;
+      let done = 0;
+      let bad = 0;
+      state.order.forEach((n) => {
+        const c = state.convs.get(n) || {};
+        if (c.phase === 'filled' || c.phase === 'parsed') done++;
+        if (c.phase === 'failed') bad++;
+      });
+      const $items = $win.find('.cxai-items').empty();
+      state.order.forEach((n) => {
+        const c = state.convs.get(n) || { n, phase: 'queued' };
+        const info = phaseInfo(c);
+        const on = (c.phase === 'requesting' || c.phase === 'thinking' || c.phase === 'answering') ? ' on' : '';
+        $items.append([
+          '<div class="cxai-item' + on + '" data-n="' + n + '">',
+          '<div class="n">' + pad2(n) + '</div>',
+          '<div class="tx"><div class="q">' + esc(c.stem || '(读取中)') + '</div>',
+          '<div class="st"><i class="cxai-dot ' + info.dot + '"></i>' + esc(info.text) + '</div></div>',
+          '</div>',
+        ].join(''));
+      });
+      if (!state.order.length) $items.append('<div class="cxai-empty" style="padding:6px 10px">暂无题目</div>');
+      $win.find('.cxai-rail-meta').text(state.meta && state.meta.concurrency ? state.meta.concurrency + ' 路并发' : '');
+      $win.find('.cxai-done').text(done + ' / ' + total);
+      $win.find('.cxai-meter i').css('width', total ? Math.round(done / total * 100) + '%' : '0%');
+      $win.find('.cxai-left').text(state.meta && state.meta.submitState ? '提交' : '待你核对提交');
+      $win.find('.cxai-fail').text(bad ? bad + ' 题失败' : (total - done > 0 ? (total - done) + ' 题未答' : '全部完成'));
+    }
+
+    function drawSession() {
+      const m = state.meta;
+      const $s = $win.find('.cxai-session');
+      if (!m) { $s.empty(); return; }
+      const parts = [];
+      parts.push('<span class="k">提取</span><span class="cxai-sm">' + esc((m.count || 0) + ' 题 · ' + (m.source || '未知来源')) + '</span>');
+      if (m.startAt) parts.push('<span class="m">' + esc(sec(m.startAt)) + '</span>');
+      if (m.answeredAt) parts.push('<span class="k">→ 开始作答</span><span class="m">' + esc(sec(m.answeredAt)) + '</span>');
+      if (m.concurrency) parts.push('<span class="k">→ 并发</span><span class="cxai-sm">' + m.concurrency + ' 路</span>');
+      if (m.note) parts.push('<span class="cxai-sm">' + esc(m.note) + '</span>');
+      $s.html(parts.join(''));
+    }
+
+    function drawThread() {
+      const $t = $win.find('.cxai-thread');
+      const top = $t[0] ? $t[0].scrollTop : 0;
+      const nearBottom = !$t[0] || ($t[0].scrollHeight - $t[0].clientHeight - top < 40);
+      const pinned = state.pinned || nearBottom;
+      if (!state.order.length && !state.submitEvents.length) {
+        $t.html('<div class="cxai-empty">还没有记录。<br>测验页开始答题后,脚本发出的每一次请求都会出现在这里。</div>');
+        return;
+      }
+      // 正在跑的题优先;已完成的收成回执
+      const active = state.order.filter((n) => LIVE[(state.convs.get(n) || {}).phase]);
+      const doneList = state.order.filter((n) => !LIVE[(state.convs.get(n) || {}).phase]);
+      $t.empty();
+      doneList.forEach((n) => {
+        const c = state.convs.get(n) || {};
+        const isOpen = state.openTurn.has(n);
+        if (!isOpen && (c.phase === 'filled' || c.phase === 'parsed')) { $t.append(receipt(c)); return; }
+        $t.append(turn(c));
+      });
+      active.forEach((n) => { $t.append(turn(state.convs.get(n) || {})); });
+      // 提交轨迹
+      if (state.submitEvents.length) $t.append(submitCard());
+      else if (state.order.length && !active.length && state.meta && state.meta.submitState !== 'done') {
+        $t.append('<div class="cxai-submit-card" style="background:#FBFCFE;border-color:#E8ECF3;color:#7C8798">'
+          + '⏸ ' + esc(state.meta.submitState === 'off' ? '自动提交已关闭:答案已填写,提交请你在答卷页自己点。' : '等待全部题目答完后再判断是否提交。')
+          + '</div>');
+      }
+      if (pinned) $t.scrollTop($t[0].scrollHeight);
+      state.pinned = false;
+    }
+
+    function receipt(c) {
+      const info = phaseInfo(c);
+      const $r = $('<div class="cxai-receipt"><span class="cxai-idx">' + pad2(c.n) + '</span>'
+        + '<span class="cxai-chip">' + esc(TYPE[c.type] || '') + '</span>'
+        + '<span class="q">' + esc(c.stem || '') + '</span></div>');
+      const res = c.result || {};
+      if (res.display) $r.append('<span class="cxai-key ' + (res.ok === false ? 'bad' : 'ok') + '">' + esc(res.display) + '</span>');
+      if (res.fillOk) $r.append('<span class="cxai-okn">✓ 已勾选</span>');
+      const t = c.t || {};
+      if (t.doneAt) $r.append('<span class="cxai-m">' + esc(dur(t.doneAt - (t.reqAt || t.queuedAt || t.doneAt))) + '</span>');
+      if (c.usage && c.usage.total_tokens) $r.append('<span class="cxai-m">' + c.usage.total_tokens + ' tok</span>');
+      $r.append('<span class="cxai-caret-r">›</span>');
+      $r.on('click', () => { state.openTurn.add(c.n); drawThread(); });
+      return $r;
+    }
+
+    function turn(c) {
+      const n = c.n;
+      const info = phaseInfo(c);
+      const $t = $('<section class="cxai-turn"></section>');
+      $t.append('<div class="cxai-turn-head"><span class="cxai-idx">' + pad2(n) + '</span>'
+        + '<span class="cxai-q">' + esc(c.stem || '') + '</span>'
+        + '<span class="cxai-chip">' + esc(TYPE[c.type] || '') + '</span></div>');
+      if (c.phase === 'queued') {
+        $t.append('<div class="cxai-receipt" style="cursor:default"><span class="cxai-dot"></span>'
+          + '<span class="q">排队中 —— 并发已占满,前面的题结束后自动开始</span></div>');
+        return $t;
+      }
+      // 请求块
+      const params = c.params || {};
+      const $req = $('<div class="cxai-req"></div>');
+      const $row = $('<div class="cxai-req-row"><span class="who">脚本</span><span class="arrow">→</span>'
+        + '<span class="who">' + esc(params.model || 'model') + '</span>'
+        + '<span class="cxai-m">' + esc(sec((c.t || {}).reqAt)) + '</span>'
+        + '<span class="cxai-m">prompt ' + String((c.prompt || '').length) + ' 字</span>'
+        + '<span class="cxai-caret-r" style="margin-left:auto">›</span></div>');
+      $row.on('click', () => {
+        const open = !$req.hasClass('open');
+        $req.toggleClass('open', open);
+        if (open) state.openReq.add(n); else state.openReq.delete(n);
+        drawThread();
+      });
+      $req.append($row);
+      const tags = [
+        params.temperature != null ? 'temperature ' + params.temperature : '',
+        'stream: ' + (c.streamed === false ? 'false' : 'true'),
+        params.effort ? 'reasoning_effort: ' + params.effort : '',
+        c.source ? '来源 ' + c.source : '',
+      ].filter(Boolean).map((x) => '<span class="cxai-chip">' + esc(x) + '</span>').join('');
+      $req.append('<div class="cxai-req-body"><pre>' + esc(c.prompt || '(未记录 prompt)') + '</pre>'
+        + '<div class="cxai-tags">' + tags + '</div></div>');
+      if (state.openReq.has(n) || c.phase === 'requesting') $req.addClass('open');
+      $t.append($req);
+      // 思考块
+      if (c.thinking) {
+        const expanded = !state.openTurn.has(-n); // 负数键表示"用户手动折叠/展开"
+        $t.append('<div class="cxai-think' + (expanded ? '' : ' collapsed') + '">'
+          + '<div class="cxai-think-head"><span class="lbl">' + (c.phase === 'thinking' ? '思考中' : '思考过程') + '</span>'
+          + '<span class="time">' + esc(thinkTime(c)) + '</span><span class="cxai-caret-r" style="margin-left:auto">›</span></div>'
+          + '<p class="cxai-think-body">' + esc(c.thinking) + (c.phase === 'thinking' ? '<span class="cxai-cursor"></span>' : '') + '</p>'
+          + '</div>');
+      } else if (c.phase === 'thinking') {
+        $t.append('<div class="cxai-think"><div class="cxai-think-head"><span class="lbl">思考中</span>'
+          + '<span class="time">' + esc(dur(Date.now() - ((c.t || {}).reqAt || Date.now()))) + '</span></div>'
+          + '<p class="cxai-think-body">等待模型吐出第一个思考片段…</p></div>');
+      } else if ((c.phase === 'answering' || c.phase === 'parsed' || c.phase === 'filled') && !c.thinking) {
+        $t.append('<div class="cxai-think"><div class="cxai-think-head"><span class="lbl" style="color:#94A0B2">该模型未返回思考过程</span></div></div>');
+      }
+      // 回答块
+      if (c.phase === 'failed') {
+        const err = c.error || {};
+        $t.append('<div class="cxai-err"><b>失败</b> · 第 ' + (c.attempt || 1) + ' 次尝试<br>' + esc(err.message || '未知错误')
+          + (err.hint ? '<br><span style="color:#8A6A2F">' + esc(err.hint) + '</span>' : '') + '</div>');
+      } else {
+        const body = c.answer
+          ? '<p class="cxai-ans-body">' + esc(c.answer) + (c.phase === 'answering' ? '<span class="cxai-cursor"></span>' : '') + '</p>'
+          : '<p class="cxai-ans-body pending">' + (c.phase === 'thinking' ? '模型还在想,回答会在这里逐字出现…' : '等待回答…') + '</p>';
+        const ansTime = (c.t && c.t.firstAnswerAt && c.t.doneAt) ? dur(c.t.doneAt - c.t.firstAnswerAt) : (c.phase === 'answering' ? '生成中' : '');
+        const $ans = $('<div class="cxai-ans"><div class="cxai-ans-head"><span class="lbl">回答</span>'
+          + '<span class="time">' + esc(ansTime) + '</span></div>' + body + '</div>');
+        const res = c.result || {};
+        if (res.display) {
+          const bits = ['<span class="cxai-key ' + (res.ok === false ? 'bad' : 'ok') + '">' + esc(res.display) + '</span>'];
+          if (res.normalized) bits.push('<span>解析 → ' + esc(res.normalized) + '</span>');
+          $ans.append('<div class="cxai-verdict">' + bits.join('<span class="cxai-sep"></span>')
+            + (res.fillOk ? '<span class="cxai-sep"></span><span class="cxai-okn">✓ 已在页面上勾选</span>' : '')
+            + (res.verifyOk === true ? '<span class="cxai-sep"></span><span class="cxai-okn">✓ 回读校验一致</span>' : '')
+            + (res.verifyOk === false ? '<span class="cxai-sep"></span><span class="cxai-badn">✗ 回读不一致</span>' : '')
+            + '</div>');
+        }
+        $t.append($ans);
+      }
+      // 页脚
+      const t = c.t || {};
+      const metaBits = [];
+      if (c.usage) {
+        if (c.usage.completion_tokens != null) metaBits.push('回答 ' + c.usage.completion_tokens + ' tok');
+        if (c.usage.total_tokens != null) metaBits.push('共 ' + c.usage.total_tokens + ' tok');
+      }
+      if (t.reqAt && t.doneAt) metaBits.push(dur(t.doneAt - t.reqAt));
+      if (c.streamed === false) metaBits.push('非流式回放');
+      const $f = $('<div class="cxai-foot2"><span class="cxai-m">' + esc(metaBits.join(' · ') || info.text) + '</span>'
+        + '<span class="acts"><button data-a="copyturn">复制本题</button><button data-a="collapse">收起</button></span></div>');
+      $t.find('.cxai-think-head').on('click', function () { $(this).parent().toggleClass('collapsed'); });
+      $f.find('[data-a=copyturn]').on('click', () => copy(turnText(c), ''));
+      $f.find('[data-a=collapse]').on('click', () => { state.openTurn.delete(n); drawThread(); });
+      $t.append($f);
+      return $t;
+    }
+
+    function thinkTime(c) {
+      const t = c.t || {};
+      if (t.firstThinkAt && t.firstAnswerAt) return dur(t.firstAnswerAt - t.firstThinkAt);
+      if (t.firstThinkAt) return dur(Date.now() - t.firstThinkAt);
+      return '';
+    }
+
+    function submitCard() {
+      const ev = state.submitEvents.slice(-8);
+      const $c = $('<div class="cxai-submit-card"><div><b>提交轨迹</b><ul></ul></div></div>');
+      ev.forEach((e) => {
+        $c.find('ul').append('<li>' + esc(sec(e.ts)) + ' · ' + esc(e.text || e.state || '') + '</li>');
+      });
+      return $c;
+    }
+
+    function drawStatus() {
+      const m = state.meta;
+      const $s = $win.find('.cxai-submit');
+      if (!m) { $s.html(''); return; }
+      const st = m.submitState;
+      const label = {
+        off: '<b>自动提交 关</b> 开启后也只在全部题目答完时触发',
+        wait: '<b>自动提交 开</b> 等待全部题目答完',
+        ready: '<b>自动提交 开</b> 全部答完,即将提交',
+        done: '<b>已提交</b> ' + esc(m.submitDetail || ''),
+        blocked: '<b>未提交</b> ' + esc(m.submitDetail || '有未答题,已停下等你'),
+        captcha: '<b>未提交</b> 出现验证码,转人工',
+      }[st] || '<b>自动提交 关</b>';
+      $s.html(label);
+    }
+
+    /* ---------- 复制 ---------- */
+    function turnText(c) {
+      const lines = [
+        `# 第 ${c.n} 题 [${TYPE[c.type] || c.type}] ${c.stem || ''}`,
+        '', '### 请求', c.prompt || '', '',
+        '### 思考', c.thinking || '(无)', '',
+        '### 回答', c.answer || '(无)',
+      ];
+      if (c.result && c.result.display) {
+        lines.push('', '### 结果', `答案 ${c.result.display}`,
+          c.result.fillOk ? '已勾选' : '未勾选',
+          c.result.verifyOk === true ? '回读校验一致' : (c.result.verifyOk === false ? '回读不一致' : ''));
+      }
+      return lines.join('\n');
+    }
+    function copy(text, label) {
+      try { GM_setClipboard(text); } catch (_) { /* 剪贴板不可用就静默 */ }
+      log.info('ai', '已复制' + (label || '记录'));
+    }
+
+    /* ---------- 位置/开关 ---------- */
+    function clamp() {
+      const el = $win.find('.cxai-win').get(0);
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const left = Math.min(Math.max(0, r.left), Math.max(0, window.innerWidth - r.width));
+      const top = Math.min(Math.max(0, r.top), Math.max(0, window.innerHeight - r.height));
+      $win.find('.cxai-win').css({ left: left + 'px', top: top + 'px' });
+    }
+    function place() {
+      const pos = config.get('autocx.ai.winPos');
+      const $w = $win.find('.cxai-win');
+      if (pos && pos.left != null) {
+        $w.css({ left: pos.left + 'px', top: pos.top + 'px' });
+      } else {
+        $w.css({
+          left: Math.max(0, Math.round((window.innerWidth - 900) / 2)) + 'px',
+          top: Math.max(0, Math.round((window.innerHeight - 640) / 2)) + 'px',
+        });
+      }
+      setTimeout(clamp, 30);
+    }
+    function draggable() {
+      $win.find('.cxai-bar').on('mousedown', (e0) => {
+        if ($(e0.target).closest('button').length) return;
+        const rect0 = $win.find('.cxai-win').get(0).getBoundingClientRect();
+        const dx = e0.clientX - rect0.left;
+        const dy = e0.clientY - rect0.top;
+        const onMove = (e) => {
+          const $w = $win.find('.cxai-win');
+          const rect = $w.get(0).getBoundingClientRect();
+          $w.css({
+            left: Math.min(Math.max(0, e.clientX - dx), Math.max(0, window.innerWidth - rect.width)) + 'px',
+            top: Math.min(Math.max(0, e.clientY - dy), Math.max(0, window.innerHeight - rect.height)) + 'px',
+          });
+        };
+        const onUp = () => {
+          $(document).off('mousemove', onMove).off('mouseup', onUp);
+          const pr = $win.find('.cxai-win').get(0).getBoundingClientRect();
+          config.set('autocx.ai.winPos', { left: Math.round(pr.left), top: Math.round(pr.top) });
+        };
+        $(document).on('mousemove', onMove).on('mouseup', onUp);
+        e0.preventDefault();
+      });
+    }
+
+    const api = {
+      open() {
+        $win.addClass('open');
+        place();
+        unbind();
+        state.sid = null;
+        bind(safeIndex());
+        draw();
+        // GM 存储写入是异步的:150ms 后再校一次,避免首帧读到旧值
+        setTimeout(() => {
+          const sid = safeIndex();
+          if (sid !== state.sid) bind(sid); else draw();
+        }, 150);
+      },
+      close() { $win.removeClass('open'); },
+      toggle() { if ($win.hasClass('open')) api.close(); else api.open(); },
+      refresh() { if ($win.hasClass('open')) { draw(); } },
+    };
+
+    function safeIndex() {
+      const idx = safeGet(AI_INDEX);
+      if (Array.isArray(idx) && idx.length) return idx[0].sid;
+      return null;
+    }
+
+    // 索引变化(新会话/新测验)时切到最新一份
+    // 索引订阅独立保存:它不能随会话切换被 unbind() 一起解绑
+    state.indexWatch = aibus.on(AI_INDEX, (idx) => {
+      if (!$win.hasClass('open')) return;
+      const list = Array.isArray(idx) ? idx : [];
+      const sid = list.length ? list[0].sid : null;
+      if (sid !== state.sid) bind(sid);
+      else draw();
+    });
+
+    $win.find('[data-a=close]').on('click', () => api.close());
+    $win.find('[data-a=copy]').on('click', () => {
+      const out = state.order.map((n) => turnText(state.convs.get(n) || { n })).join('\n\n---\n\n');
+      copy(out || '(没有记录)', '全部记录');
+    });
+    $win.on('mousedown', (e) => { if (e.target === $win.get(0)) api.close(); });
+    $(document).on('keydown', (e) => { if (e.key === 'Escape' && $win.hasClass('open')) api.close(); });
+    draggable();
+
+    // 打开即绑定最新会话(可能已在答题中)
+    return api;
+  }
+
+  /** 调试用:造一份演示记录(不触发任何真实请求),用来离线核对窗口界面 */
+  function seedDemo() {
+    const sid = 'demo';
+    const t0 = Date.now() - 90000;
+    const meta = {
+      sid, workKey: 'demo',
+      title: '演示数据 · 影视艺术概述 · 章节测验',
+      count: 3, source: '接口明文', concurrency: 2,
+      model: config.get('llm.model'), effort: String(config.get('llm.effort') || ''),
+      host: String(config.get('llm.base_url') || '').replace(/^https?:\/\//, '').replace(/\/.*$/, ''),
+      keyTail: String(config.get('llm.api_key') || '').slice(-4),
+      startAt: t0, answeredAt: t0 + 2000, answered: 1, failed: 0,
+      submitState: 'off', submitDetail: '', events: [],
+    };
+    aibus.touchIndex(meta);
+    aibus.put(AI_S(sid), meta);
+    aibus.put(AI_C(sid, 1), {
+      n: 1, type: 'single', stem: '下列选项错误描述影视艺术的是（　）',
+      options: [], source: '接口明文', phase: 'filled',
+      prompt: '请回答下面这道单选题。\n题目:下列选项错误描述影视艺术的是（　）\nA、影视艺术是综合艺术的结晶\nB、影视艺术是高雅的艺术门类\nC、影视艺术是强大的传播媒体\nD、影视艺术是现代科技的产物\n要求:只回复正确选项的字母(如 B),不要任何解释。',
+      params: { model: meta.model, temperature: 0.1, effort: meta.effort, stream: true },
+      thinking: '逐项看:A 说影视艺术是综合艺术的结晶,这是教材原文;C 说它是强大的传播媒体,也对;D 说它依赖现代科技,同样成立。B 把它归为“高雅的艺术门类”,而影视艺术恰恰被公认为大众艺术,所以 B 的描述是错的。',
+      answer: 'B', streamed: true,
+      result: { display: 'B', normalized: '单选取首字母 → B', letters: ['B'], ok: true, fillOk: true, verifyOk: true },
+      usage: { completion_tokens: 96, total_tokens: 412 }, error: null, attempt: 1,
+      t: { queuedAt: t0, reqAt: t0 + 2000, firstThinkAt: t0 + 2300, firstAnswerAt: t0 + 4800, doneAt: t0 + 6300 },
+    });
+    aibus.put(AI_C(sid, 2), {
+      n: 2, type: 'judge', stem: '中国戏曲舞台要求设置与真实相同的时空。（　）',
+      options: [], source: 'DOM 提取', phase: 'thinking',
+      prompt: '请回答下面这道判断题。\n题目:中国戏曲舞台要求设置与真实相同的时空。（　）\nA、正确\nB、错误\n要求:只回复正确选项的字母(如 B),不要任何解释。',
+      params: { model: meta.model, temperature: 0.1, effort: meta.effort, stream: true },
+      thinking: '题干在问“是否要求与真实相同的时空”。戏曲舞台的核心特征是虚拟性与程式化,一桌二椅可以代表整个厅堂,时间和空间随表演自由流动,恰恰',
+      answer: '', streamed: true, result: null, usage: null, error: null, attempt: 1,
+      t: { queuedAt: t0, reqAt: Date.now() - 3100, firstThinkAt: Date.now() - 2800, firstAnswerAt: 0, doneAt: 0 },
+    });
+    aibus.put(AI_C(sid, 3), {
+      n: 3, type: 'single', stem: '电影发展历程中,蒙太奇手法最早系统的实践者是（　）',
+      options: [], source: 'DOM 提取', phase: 'queued', prompt: '', params: null,
+      thinking: '', answer: '', streamed: true, result: null, usage: null, error: null, attempt: 0,
+      t: { queuedAt: t0 },
+    });
+    aibus.put(AI_PING, {
+      sid, title: meta.title, count: meta.count, answered: 1, failed: 0,
+      submitState: 'off', model: meta.model, source: meta.source, ts: Date.now(),
+    });
+    return sid;
+  }
 
   /* ============================== 悬浮面板 ================================= */
   // 仅在 top 帧渲染;通过 GM_addValueChangeListener 聚合各任务帧的日志/状态
@@ -361,6 +1407,12 @@
       #autocx-panel .cx-btn{background:linear-gradient(135deg,#3B7CFF,#60A5FA);border:0;border-radius:8px;
         color:#fff;padding:6px 14px;cursor:pointer;font-size:12.5px}
       #autocx-panel .cx-test-result{margin-top:6px;font-size:12px}
+      /* ---------- 关于(仓库入口) ---------- */
+      #autocx-panel .cx-about{margin-top:10px;padding-top:9px;border-top:1px solid #EEF1F6;
+        display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;color:#9ca3af}
+      #autocx-panel .cx-about a{color:#7C8798;text-decoration:none}
+      #autocx-panel .cx-about a:hover{color:#3B7CFF;text-decoration:underline}
+      #autocx-panel .cx-about .cx-about-sep{color:#D5DBE5}
       /* ---------- 开关 ---------- */
       #autocx-panel .cx-switch{position:relative;width:36px;height:20px;background:#d1d5db;border-radius:10px;
         cursor:pointer;transition:background .15s}
@@ -368,6 +1420,11 @@
       #autocx-panel .cx-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
         border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
       #autocx-panel .cx-switch.on::after{left:18px}
+      /* ---------- AI 页签 ---------- */
+      #autocx-panel .cx-ai-tip{font-size:11px;color:#9ca3af;line-height:1.6;margin:2px 0 8px}
+      #autocx-panel .cx-ai-row{display:flex;align-items:center;justify-content:space-between;gap:8px;
+        padding:5px 0;border-bottom:1px solid #EEF1F6;font-size:12px;color:#4b5563}
+      #autocx-panel .cx-ai-row b{color:#1f2937;font-size:12px;font-weight:600;white-space:nowrap}
     `);
 
     elmGetter.get('body', 15000).then((body) => {
@@ -382,6 +1439,7 @@
               <div class="mi" data-act="open">展开窗口 <span class="st">›</span></div>
               <div class="mi" data-act="toggle-video">看课助手 <span class="st st-v"></span></div>
               <div class="mi" data-act="toggle-quiz">答题助手 <span class="st st-q"></span></div>
+              <div class="mi" data-act="ai">答题记录 <span class="st">›</span></div>
               <div class="mi" data-act="toggle-main">总开关 <span class="st st-m"></span></div>
             </div>
           </div>
@@ -406,11 +1464,17 @@
             <div class="cx-tabs">
               <button data-tab="status" class="active">状态</button>
               <button data-tab="log">日志</button>
+              <button data-tab="ai">AI</button>
               <button data-tab="settings">设置</button>
             </div>
             <div class="cx-body">
               <div class="cx-page active" data-page="status"><div class="cx-status-list"><i style="color:#9ca3af">等待任务帧上报…</i></div></div>
               <div class="cx-page" data-page="log"><div class="cx-log"></div></div>
+              <div class="cx-page" data-page="ai">
+                <div class="cx-ai-tip">答题时,脚本发出的请求、模型思考与回答都会记进「AI 作答记录」窗口。</div>
+                <div class="cx-item"><button class="cx-btn cx-ai-open">打开作答记录窗口</button></div>
+                <div class="cx-ai-list"></div>
+              </div>
               <div class="cx-page" data-page="settings">
                 <div class="cx-item"><label>LLM Base URL</label><input type="text" data-cfg="llm.base_url"></div>
                 <div class="cx-item"><label>LLM API Key</label><input type="password" data-cfg="llm.api_key"></div>
@@ -423,19 +1487,33 @@
                     <option value="">不发送该参数</option>
                   </select></div>
                 <div class="cx-item"><label>停滞超时(秒,慢模型调大)</label><input type="number" min="15" max="600" data-cfg="llm.timeout"></div>
+                <div class="cx-item"><label>流式接收(思考过程逐字显示)</label><input type="checkbox" data-cfg="llm.stream"></div>
                 <div class="cx-item"><label>视频倍速 (1-16)</label><input type="number" min="1" max="16" data-cfg="video.speed"></div>
                 <div class="cx-item"><label>视频静音</label><input type="checkbox" data-cfg="video.mute"></div>
                 <div class="cx-item"><label>自动勾选答案</label><input type="checkbox" data-cfg="quiz.auto_fill"></div>
                 <div class="cx-item"><label>自动提交(全答完才生效)</label><input type="checkbox" data-cfg="quiz.auto_submit"></div>
+                <div class="cx-item"><label>两答一致性校验(防手滑)</label><input type="checkbox" data-cfg="quiz.double_check"></div>
                 <div class="cx-item"><label>翻页间隔基数(秒)</label><input type="number" min="1" max="10" data-cfg="doc.interval"></div>
                 <div class="cx-item"><label>调试日志</label><input type="checkbox" data-cfg="debug"></div>
                 <div class="cx-item"><button class="cx-btn cx-test-llm">测试 LLM 连接</button></div>
                 <div class="cx-test-result"></div>
+                <div class="cx-about">
+                  <span class="cx-about-v"></span>
+                  <span class="cx-about-sep">·</span>
+                  <a href="${REPO.github}" target="_blank" rel="noopener noreferrer">GitHub</a>
+                  <span class="cx-about-sep">·</span>
+                  <a href="${REPO.gitee}" target="_blank" rel="noopener noreferrer">Gitee</a>
+                  <span class="cx-about-sep">·</span>
+                  <a href="${REPO.issues}" target="_blank" rel="noopener noreferrer">反馈</a>
+                  <span class="cx-about-sep">·</span>
+                  <span>MIT</span>
+                </div>
               </div>
             </div>
           </div>
         </div>`);
       $(body).append($panel);
+      $panel.find('.cx-about-v').text('AutoCX v' + VERSION);
 
       // ---- 助手开关渲染 ----
       const assistOn = (k) => config.get(k) !== false;
@@ -505,6 +1583,9 @@
       makeDraggable($panel.find('.cx-head')); // 展开后拖头部移动窗口
 
       const openPanel = () => { $panel.addClass('open'); setTimeout(clampIntoView, 50); };
+      const openAI = () => {
+        try { AIW.ensure().open(); } catch (e) { log.error('panel', '打开作答记录失败: ' + e.message); }
+      };
       $ball.on('click', (e) => {
         if (ballMoved() || e.target.closest('.cx-menu')) return;
         openPanel();
@@ -513,6 +1594,7 @@
         e.stopPropagation();
         const act = $(this).data('act');
         if (act === 'open') openPanel();
+        else if (act === 'ai') openAI();
         else if (act === 'toggle-video') toggleAssist('assist.video', '看课助手');
         else if (act === 'toggle-quiz') toggleAssist('assist.quiz', '答题助手');
         else if (act === 'toggle-main') { config.set('autocx.enabled', !isEnabled()); renderAssist(); renderSwitch(); }
@@ -550,6 +1632,33 @@
           log.debug('panel', `配置更新 ${key}`);
         });
       });
+
+      // ---- AI 页签:实时摘要 + 打开记录窗口 ----
+      const $aiList = $panel.find('.cx-ai-list');
+      const AI_STATE = {
+        off: '自动提交 关', wait: '自动提交 开 · 等待答完', ready: '自动提交 开 · 即将提交',
+        done: '已提交', blocked: '未提交(有未答题)', captcha: '未提交(验证码转人工)',
+      };
+      const renderAIPanel = () => {
+        let m = null;
+        try { m = GM_getValue(AI_PING) || null; } catch (_) { m = null; }
+        if (!m || !m.count) {
+          $aiList.html('<i style="color:#9ca3af">还没有记录。测验页开始答题后,这里会显示进度。</i>');
+          return;
+        }
+        const bad = Number(m.failed) || 0;
+        $aiList.html(
+          '<div class="cx-ai-row"><span>' + escHtml(m.title || '章节测验') + '</span><b>'
+            + (Number(m.answered) || 0) + ' / ' + m.count + '</b></div>'
+          + '<div class="cx-ai-row"><span>失败</span><b style="color:' + (bad ? '#dc2626' : '#1f2937') + '">'
+            + bad + ' 题</b></div>'
+          + '<div class="cx-ai-row"><span>提交</span><b>' + (AI_STATE[m.submitState] || '未知') + '</b></div>'
+          + '<div class="cx-ai-row"><span>' + escHtml(m.model || '') + '</span><b>' + escHtml(m.source || '') + '</b></div>'
+        );
+      };
+      renderAIPanel();
+      $panel.find('.cx-ai-open').on('click', openAI);
+      GM_addValueChangeListener(AI_PING, (_k, _o, nv, remote) => { if (remote && nv) renderAIPanel(); });
 
       // ---- LLM 测试 ----
       $panel.find('.cx-test-llm').on('click', function () {
@@ -749,6 +1858,17 @@
     report(module, 'start', '检测到测验页面');
     log.info(module, '测验页面启动');
 
+    // ---- 作答记录:会话句柄 + 提交轨迹事件(autoSubmit 等散点通过它留痕) ----
+    let aiSession = null;
+    function aiEvent(text, patch) {
+      if (!aiSession) return;
+      const m = aiSession.meta;
+      m.events.push({ ts: Date.now(), text: text });
+      if (m.events.length > 20) m.events = m.events.slice(-20);
+      if (patch) Object.assign(m, patch);
+      aibus.put(AI_S(aiSession.sid), Object.assign({}, m, { events: m.events.slice(-20) }));
+    }
+
     // ---- 1) ajaxHook 拦截题目接口明文(学习通用字体混淆 DOM 文本,接口是明文) ----
     let captured = null; // 从接口 JSON 提取的题目数组
     try {
@@ -788,6 +1908,25 @@
 
     async function run() {
       if (!isEnabled()) return log.info(module, '总开关关闭,不执行答题');
+
+      // ---- 闸口2: 批阅/查看模式内容级复检(URL 闸的漏网之鱼) ----
+      // 批阅页特征:出现"我的答案/正确答案/得分"等标记;或没有可见提交按钮。
+      // 注意:不能含 score——答卷页头部有 "Total score: 100.0",会误伤
+      const bodyText = (document.body && document.body.innerText) || '';
+      const hasReviewMark = /My Answer|我的答案|正确答案|批阅|查看答案|查看解析|得分/.test(bodyText);
+      const hasSubmit = $(SELECTORS.quiz.submit).filter(':visible').length > 0;
+      if (hasReviewMark || !hasSubmit) {
+        log.info(module, `判定为批阅/查看页(批阅标记=${hasReviewMark}, 提交按钮=${hasSubmit}),不操作`);
+        report(module, 'review', '批阅/查看页,不操作');
+        return;
+      }
+      // ---- 闸口2b: 可答性正向校验 ----
+      if (!$('li[onclick*="addChoice"], input[type=radio], input[type=checkbox]').length) {
+        log.info(module, '未发现可交互选项,非答卷页,退出');
+        report(module, 'review', '无可交互选项,不操作');
+        return;
+      }
+
       // 跨帧锁:同一测验可能被多个嵌套帧同时识别(ananas/work + doHomeWorkNew),
       // 抢锁成功的实例才干活,其余退出,防止重复答题/重复提交
       const workKey = (location.href.match(/workId=([0-9a-z]+)/i) || [null, location.pathname])[1];
@@ -809,6 +1948,55 @@
       log.info(module, `共 ${questions.length} 题,来源: ${captured ? '接口明文' : 'DOM(可能被字体混淆)'}`);
       report(module, 'extracted', `提取到 ${questions.length} 题`);
 
+      /* ---------- 作答记录:会话快照 + 每题初始状态(供 AI 记录窗口消费) ---------- */
+      const sid = 'w' + String(workKey).replace(/[^0-9a-z]/gi, '').slice(0, 16);
+      const aiMeta = {
+        sid, workKey,
+        title: String(document.title || '').replace(/\s+/g, ' ').trim().slice(0, 80) || '章节测验',
+        count: questions.length,
+        source: captured ? '接口明文' : 'DOM 提取',
+        concurrency: 2,
+        model: config.get('llm.model'),
+        effort: String(config.get('llm.effort') || ''),
+        host: String(config.get('llm.base_url') || '').replace(/^https?:\/\//, '').replace(/\/.*$/, ''),
+        keyTail: String(config.get('llm.api_key') || '').slice(-4),
+        startAt: Date.now(),
+        answeredAt: 0,
+        answered: 0,
+        failed: 0,
+        submitState: config.get('quiz.auto_submit') ? 'wait' : 'off',
+        submitDetail: '',
+        events: [],
+      };
+      aibus.touchIndex(aiMeta);
+      const metaWrite = () => {
+        const snap = Object.assign({}, aiMeta, { events: aiMeta.events.slice(-20) });
+        aibus.put(AI_S(sid), snap);
+        aibus.put(AI_PING, {
+          sid, title: snap.title, count: snap.count, answered: snap.answered,
+          failed: snap.failed, submitState: snap.submitState, model: snap.model,
+          source: snap.source, ts: Date.now(),
+        });
+      };
+      metaWrite();
+      aiSession = { sid, meta: aiMeta };
+
+      const convs = questions.map((q) => {
+        const c = {
+          index: q.index, type: q.type, stem: q.stem, options: q.options || [],
+          source: aiMeta.source, phase: 'queued', prompt: '', params: null,
+          thinking: '', answer: '', streamed: true, result: null, usage: null,
+          error: null, attempt: 0, t: { queuedAt: Date.now() },
+        };
+        aibus.put(AI_C(sid, q.index), convSnapshot(c));
+        return c;
+      });
+      const writers = new Map();
+      const writer = (index) => {
+        if (!writers.has(index)) writers.set(index, makeConvWriter(sid, index));
+        return writers.get(index);
+      };
+
       // 未配置 API Key:只提取不答题
       if (!config.get('llm.api_key')) {
         questions.forEach((q) => log.info(module, `题目${q.index}[${q.type}] ${q.stem.slice(0, 60)}`));
@@ -821,51 +2009,171 @@
       let stopped = false;
       const stats = { ok: 0, failed: [] };
 
-      // 单题处理(含一次重试;全链路日志:题型/原始回答/规范化/实际填写)
+      // 单题处理(含一次重试;全链路日志 + 作答记录留痕:请求/思考/回答/解析/勾选/校验)
       const answerOne = async (q) => {
         if (stopped || !isEnabled()) return;
+        const c = convs[q.index - 1];
         setBadge(q, '思考中…', 'thinking');
+        if (!aiMeta.answeredAt) { aiMeta.answeredAt = Date.now(); metaWrite(); }
         for (let attempt = 1; attempt <= 2; attempt++) {
+          // 每次尝试都重置这条记录,失败重试时窗口能看出是第几次
+          c.attempt = attempt;
+          c.phase = 'requesting';
+          c.prompt = buildPrompt(q);
+          c.params = {
+            model: aiMeta.model,
+            temperature: 0.1,
+            effort: aiMeta.effort,
+            stream: config.get('llm.stream') !== false,
+          };
+          c.thinking = '';
+          c.answer = '';
+          c.error = null;
+          c.result = null;
+          c.t = c.t || {};
+          c.t.reqAt = Date.now();
+          c.t.firstThinkAt = 0;
+          c.t.firstAnswerAt = 0;
+          c.t.doneAt = 0;
+          writer(q.index).write(convSnapshot(c), true);
           try {
-            const raw = await llm.chat(buildPrompt(q));
+            const st = await llm.stream(c.prompt, {
+              onThinking: (text, s) => {
+                c.phase = 'thinking';
+                c.thinking = s.thinking;
+                if (!c.t.firstThinkAt) c.t.firstThinkAt = Date.now();
+                writer(q.index).write(convSnapshot(c));
+              },
+              onAnswer: (text, s) => {
+                c.phase = 'answering';
+                c.answer = s.answer;
+                c.streamed = s.streamed !== false;
+                if (!c.t.firstAnswerAt) c.t.firstAnswerAt = Date.now();
+                writer(q.index).write(convSnapshot(c));
+              },
+            }).promise;
+            c.thinking = st.thinking;
+            c.answer = st.answer;
+            c.usage = st.usage || null;
+            c.streamed = st.streamed !== false;
+            c.t.doneAt = Date.now();
             failStreak = 0;
-            const parsed = parseAnswer(q, raw);
+            const parsed = parseAnswer(q, st.answer);
+            c.result = {
+              display: parsed.display, normalized: parsed.normalized,
+              letters: parsed.letters || [], ok: parsed.ok, fillOk: false, verifyOk: null,
+            };
             // 全链路日志:题型 -> 原始回答 -> 规范化答案
-            log.info(module, `题目${q.index}[${q.type}] 原始回答: ${String(raw).replace(/\s+/g, ' ').slice(0, 80)} → 规范化: ${parsed.normalized || '(无)'}`);
-            setBadge(q, `AI: ${parsed.display}`, parsed.ok ? 'ok' : 'bad');
+            log.info(module, `题目${q.index}[${q.type}] 原始回答: ${String(st.answer).replace(/\s+/g, ' ').slice(0, 80)} → 规范化: ${parsed.normalized || '(无)'}`);
             if (!parsed.ok) {
+              setBadge(q, `AI: ${parsed.display}`, 'bad');
               stats.failed.push(q.index);
+              c.phase = 'failed';
+              c.error = {
+                message: '回答无法解析成答案',
+                hint: '原始回答: ' + String(st.answer).replace(/\s+/g, ' ').slice(0, 80),
+              };
+              writer(q.index).write(convSnapshot(c), true);
+              aiMeta.failed += 1;
+              metaWrite();
               log.warn(module, `题目${q.index} 解析失败,未作答`);
               return;
             }
+            // 两答一致性校验:同题再问一遍,不一致则标记存疑、不填写、阻断自动提交
+            if (config.get('quiz.double_check')) {
+              setBadge(q, `复核中(${parsed.display})…`, 'thinking');
+              c.phase = 'rechecking';
+              writer(q.index).write(convSnapshot(c));
+              const st2 = await llm.stream(c.prompt, {
+                onThinking: () => {}, onAnswer: () => {},
+              }).promise;
+              const parsed2 = parseAnswer(q, st2.answer);
+              c.recheck = {
+                answer: st2.answer, normalized: parsed2.normalized,
+                ok: parsed2.ok, consistent: parsed2.ok && parsed2.normalized === parsed.normalized,
+              };
+              log.info(module, `题目${q.index} 复核回答: ${String(st2.answer).replace(/\s+/g, ' ').slice(0, 80)} → 规范化: ${parsed2.normalized || '(无)'}`);
+              if (!parsed2.ok || parsed2.normalized !== parsed.normalized) {
+                setBadge(q, `存疑: ${parsed.display}/${parsed2.ok ? parsed2.display : '?'}`, 'doubt');
+                log.warn(module, `题目${q.index} 两次作答不一致(${parsed.normalized} vs ${parsed2.normalized || '解析失败'}),跳过不填,请人工定夺`);
+                stats.failed.push(q.index);
+                c.phase = 'failed';
+                c.error = {
+                  message: `两次作答不一致(${parsed.normalized} vs ${parsed2.normalized || '解析失败'})`,
+                  hint: '模型对本题把握不定,已跳过不填。请人工核对后自行选择。',
+                };
+                writer(q.index).write(convSnapshot(c), true);
+                aiMeta.failed += 1;
+                metaWrite();
+                return;
+              }
+            }
+            setBadge(q, `AI: ${parsed.display}`, 'ok');
             if (config.get('quiz.auto_fill')) {
+              // 闸口3: 填写前可交互性复检(批阅页最后一道防线)
+              const bt = (document.body && document.body.innerText) || '';
+              if (/My Answer|我的答案|正确答案|批阅|查看答案|查看解析|得分/i.test(bt)) {
+                log.warn(module, `题目${q.index} 检测到批阅/查看页特征,拒绝点击填写`);
+                report(module, 'review', '批阅页特征,已停止填写');
+                stats.failed.push(q.index);
+                c.phase = 'failed';
+                c.error = { message: '批阅/查看页特征,拒绝点击', hint: '该页不允许作答,脚本未做任何点击' };
+                writer(q.index).write(convSnapshot(c), true);
+                aiMeta.failed += 1;
+                metaWrite();
+                return;
+              }
               fillAnswer(q, parsed);
               // 填后校验:回读 DOM 勾选状态,与意图不一致则判失败(阻断自动提交)
               const actual = q.type === 'blank' ? null : readCheckedLetters(q);
               if (actual !== null) {
                 const expect = parsed.letters.join('');
+                c.result.fillOk = true;
+                c.result.verifyOk = (expect === actual);
                 log.info(module, `题目${q.index} 填写校验: 意图=${expect} 实际=${actual}${expect === actual ? ' ✓' : ' ✗'}`);
                 if (expect !== actual) {
                   log.error(module, `题目${q.index} 填写与解析不一致(意图 ${expect},实际 ${actual}),中止本题`);
                   setBadge(q, `AI: ${parsed.display}(填写异常)`, 'bad');
                   stats.failed.push(q.index);
+                  c.phase = 'failed';
+                  c.error = {
+                    message: `填写与解析不一致(意图 ${expect},实际 ${actual})`,
+                    hint: '本题不参与自动提交,请人工确认',
+                  };
+                  writer(q.index).write(convSnapshot(c), true);
+                  aiMeta.failed += 1;
+                  metaWrite();
                   return;
                 }
+              } else {
+                c.result.fillOk = true; // 填空:没有可回读的勾选状态
               }
             }
             stats.ok++;
+            c.phase = 'filled';
+            writer(q.index).write(convSnapshot(c), true);
+            aiMeta.answered += 1;
+            metaWrite();
             return;
           } catch (e) {
+            c.phase = 'failed';
+            c.error = { message: e.message, hint: attempt < 2 ? '自动重试一次' : '本题放弃' };
+            writer(q.index).write(convSnapshot(c), true);
             log.warn(module, `题目${q.index} 第${attempt}次调用失败: ${e.message}`);
           }
         }
         failStreak++;
         stats.failed.push(q.index);
         setBadge(q, '失败', 'bad');
+        aiMeta.failed += 1;
+        metaWrite();
         if (failStreak >= 3) {
           stopped = true;
           log.error(module, '连续 3 题失败,暂停答题。请检查 LLM 配置。');
           report(module, 'error', 'LLM 连续失败,已暂停');
+          aiEvent('连续 3 题失败,已暂停答题。请检查 LLM 配置。', {
+            submitState: 'blocked', submitDetail: 'LLM 连续失败',
+          });
         }
       };
 
@@ -882,14 +2190,22 @@
       if (stopped) return;
       if (config.get('quiz.auto_submit')) {
         if (stats.failed.length === 0 && stats.ok === questions.length) {
+          aiMeta.answered = stats.ok;
+          aiEvent('全部题目已作答,准备自动提交', { submitState: 'ready' });
           autoSubmit();
         } else {
           log.warn(module, `有 ${stats.failed.length} 题未答(题号: ${stats.failed.join(',')}),不自动提交,请人工处理后提交。`);
           report(module, 'filled', `${stats.ok}/${questions.length} 已答,有未答题,等待人工`);
+          aiEvent(`有 ${stats.failed.length} 题未答(题号: ${stats.failed.join(',')}),不自动提交`, {
+            submitState: 'blocked', submitDetail: `${stats.failed.length} 题未答`,
+          });
         }
       } else {
         log.info(module, '答题流程结束。请人工核对后自行提交(自动提交可在设置中开启)。');
         report(module, 'filled', '答题完成,等待人工核对提交');
+        aiEvent(`${stats.ok}/${questions.length} 已答。自动提交已关闭,请人工核对后提交`, {
+          submitState: 'off', submitDetail: '',
+        });
       }
     }
 
@@ -899,6 +2215,7 @@
     function autoSubmit() {
       log.info(module, '全部题目已作答,3 秒后自动提交…');
       report(module, 'submitting', '全部答完,自动提交中');
+      aiEvent('3 秒后点击提交按钮(自动提交已开启)');
       setTimeout(() => {
         try {
           // 拦截原生 confirm/alert,防止确认框卡住流程(10 秒后恢复)
@@ -914,14 +2231,17 @@
             if (/已提交|已完成|查看答案|答案解析|不能再提交/.test(bodyText) || !$('li[onclick*="addChoice"]').length) {
               log.warn(module, '未找到提交按钮,且无可选题目——可能已提交过,无需操作');
               report(module, 'submitted', '测验已是完成状态');
+              aiEvent('未找到提交按钮,但页面已是完成状态(可能之前已提交)', { submitState: 'done', submitDetail: '页面已是完成态' });
             } else {
               log.error(module, '未找到提交按钮,请人工提交(选择器可能已改版)');
               report(module, 'error', '未找到提交按钮,请人工提交');
+              aiEvent('未找到提交按钮,请人工提交(选择器可能已改版)', { submitState: 'blocked', submitDetail: '未找到提交按钮' });
             }
             return;
           }
           btn.click();
           log.info(module, '已点击提交按钮,等待确认弹窗…');
+          aiEvent('已点击提交按钮,等待确认弹窗');
 
           // 等待顶层 workPop 确认弹窗出现并点击其确认按钮(最多 6 秒)
           let tries = 0;
@@ -940,6 +2260,7 @@
                 $pop.get(0).click();
                 confirmed = true;
                 log.info(module, '已点击确认弹窗 Submit');
+                aiEvent('已点击确认弹窗 Submit');
               }
             } catch (e) {
               log.warn(module, '访问顶层弹窗失败: ' + e.message);
@@ -952,6 +2273,7 @@
         } catch (e) {
           log.error(module, '自动提交异常: ' + e.message + ',请人工提交');
           report(module, 'error', '自动提交异常,请人工提交');
+          aiEvent('自动提交异常,请人工提交', { submitState: 'blocked', submitDetail: '提交异常' });
         }
       }, 3000);
 
@@ -960,6 +2282,7 @@
         if (round > 20) {
           log.error(module, '提交结果未确认,请检查页面后人工处理');
           report(module, 'error', '提交结果未确认');
+          aiEvent('提交结果未确认,请检查页面后人工处理', { submitState: 'blocked', submitDetail: '结果未确认' });
           return;
         }
         setTimeout(() => {
@@ -969,6 +2292,7 @@
             if (cap && cap.offsetWidth && cap.offsetHeight) {
               log.warn(module, '出现图片验证码,请人工输入并完成提交');
               report(module, 'captcha', '出现验证码,等待人工');
+              aiEvent('出现图片验证码,转人工处理', { submitState: 'captcha', submitDetail: '出现验证码' });
               return;
             }
             // 2) 提交按钮消失或页面出现完成态文本 -> 成功
@@ -978,6 +2302,7 @@
             if (!stillBtn || doneText) {
               log.info(module, '自动提交成功 ✅');
               report(module, 'submitted', '自动提交成功');
+              aiEvent('自动提交成功', { submitState: 'done', submitDetail: '已提交' });
               return;
             }
             verifySubmitted(round + 1);
@@ -1185,7 +2510,7 @@
         $b = $('<span class="autocx-badge" style="margin-left:8px;padding:1px 6px;border-radius:3px;font-size:12px;"></span>');
         $(q.dom).find(SELECTORS.quiz.title).first().append($b);
       }
-      const colors = { thinking: '#63b4ff', ok: '#21d181', bad: '#ff4d4f' };
+      const colors = { thinking: '#63b4ff', ok: '#21d181', bad: '#ff4d4f', doubt: '#f59e0b' };
       $b.text(text).css({ background: colors[state] || '#999', color: '#fff' });
     }
 
@@ -1366,6 +2691,13 @@
     });
   }
 
+  // 顶层帧注册菜单:任意时候都能打开作答记录(单独打开答卷页时也没有别的入口)
+  if (window.top === window.self) {
+    try {
+      GM_registerMenuCommand('打开 AI 作答记录', () => { AIW.ensure().open(); });
+    } catch (e) { log.debug('bootstrap', '注册菜单命令失败: ' + e.message); }
+  }
+
   const role = detectRole();
   if (!role) {
     // 非目标帧,静默退出
@@ -1378,6 +2710,28 @@
       spoofVisibility(); // 顶层页是 mouseout 防挂机检测所在帧
       initTopPanel();
       initTopAdvance();
+      // 调试钩子(与 __autocxQuiz 同一约定):离线核对窗口界面,不影响正常流程
+      try {
+        const pw = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        pw.__autocxAI = {
+          open: () => AIW.ensure().open(),
+          close: () => { if (AIW.api) AIW.api.close(); },
+          index: () => GM_getValue(AI_INDEX) || [],
+          demo: () => { const sid = seedDemo(); AIW.ensure().open(); return sid; },
+          clear: (sid) => {
+            const target = sid || 'demo';
+            let idx = [];
+            try { idx = GM_getValue(AI_INDEX) || []; } catch (_) { idx = []; }
+            if (!Array.isArray(idx)) idx = [];
+            const item = idx.find((it) => it && it.sid === target);
+            aibus.drop(target, item ? item.count : 12);
+            try { GM_deleteValue(AI_S(target)); } catch (_) { /* 忽略 */ }
+            try { GM_deleteValue(AI_PING); } catch (_) { /* 忽略 */ }
+            aibus.put(AI_INDEX, idx.filter((it) => it && it.sid !== target));
+            return 'cleared:' + target;
+          },
+        };
+      } catch (e) { log.debug('ai', '调试钩子暴露失败: ' + e.message); }
       break;
     case 'knowledge':
       initKnowledgeFrame();
@@ -1391,6 +2745,10 @@
       initDocFrame();
       break;
     case 'quiz':
+      // 有人会直接在新标签页打开答卷:这时候没有顶层悬浮面板,窗口只能挂在本帧
+      if (window.top === window.self) {
+        try { AIW.ensure(); } catch (e) { log.warn('ai', '挂载作答记录失败: ' + e.message); }
+      }
       initQuizPage();
       break;
   }
