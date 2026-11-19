@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      1.0.1
+// @version      1.0.6
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -204,6 +204,7 @@
     GM_setValue(STATUS_KEY, {
       ts: Date.now(), module, state, detail: detail || '',
       frame: location.hostname + location.pathname.slice(0, 60),
+      href: location.href, // 顶层据此过滤"别的章节/别的标签页"的任务帧事件
     });
   }
 
@@ -767,7 +768,7 @@
     #autocx-ai-vue-root .acx-ai-title b{display:block;font:600 19px/1.1 Georgia,"Songti SC",serif}
     #autocx-ai-vue-root .acx-ai-title span{display:block;font-size:10px;color:#7C8688;margin-top:3px;letter-spacing:.1em;max-width:460px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     #autocx-ai-vue-root .acx-ai-meta{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:10px;color:#7C8688}
-    #autocx-ai-vue-root .acx-ai-meta .pill{border:1px solid rgba(30,42,47,.18);padding:3px 7px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+    #autocx-ai-vue-root .acx-ai-meta .acx-pill{border:1px solid rgba(30,42,47,.18);padding:3px 7px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
     #autocx-ai-vue-root .acx-ai-close{border:0;background:transparent;font-size:22px;line-height:1;color:#7C8688;cursor:pointer;padding:0 2px}
     #autocx-ai-vue-root .acx-ai-close:hover{color:#C2453A}
     #autocx-ai-vue-root .acx-ai-copy{border:0;background:transparent;font-size:14px;line-height:1;color:#7C8688;cursor:pointer;padding:0 4px}
@@ -779,24 +780,24 @@
     #autocx-ai-vue-root .acx-ai-items{flex:1;overflow:auto;scrollbar-width:thin}
     #autocx-ai-vue-root .acx-ai-item{padding:10px 14px 10px 18px;border-bottom:1px solid rgba(30,42,47,.07);position:relative;cursor:pointer}
     #autocx-ai-vue-root .acx-ai-item:hover{background:rgba(250,250,245,.6)}
-    #autocx-ai-vue-root .acx-ai-item.on{background:#FAFAF5}
-    #autocx-ai-vue-root .acx-ai-item.on::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#C2453A}
-    #autocx-ai-vue-root .acx-ai-item .num{font:600 10px/1 Georgia,serif;color:#C2453A;letter-spacing:.04em}
-    #autocx-ai-vue-root .acx-ai-item .q{font-size:10.5px;color:#334246;margin-top:4px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-    #autocx-ai-vue-root .acx-ai-item .st{font-size:9px;color:#8B9495;margin-top:4px;display:flex;align-items:center;gap:4px}
-    #autocx-ai-vue-root .acx-ai-item .st i{width:5px;height:5px;border-radius:50%;background:#2F8F5B;display:inline-block;flex:none}
-    #autocx-ai-vue-root .acx-ai-item .st.live i{background:#C2453A;animation:acx-pulse 1.4s infinite}
-    #autocx-ai-vue-root .acx-ai-item .st.bad i{background:#C2453A}
+    #autocx-ai-vue-root .acx-ai-item.acx-on{background:#FAFAF5}
+    #autocx-ai-vue-root .acx-ai-item.acx-on::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#C2453A}
+    #autocx-ai-vue-root .acx-ai-item .acx-num{font:600 10px/1 Georgia,serif;color:#C2453A;letter-spacing:.04em}
+    #autocx-ai-vue-root .acx-ai-item .acx-q{font-size:10.5px;color:#334246;margin-top:4px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    #autocx-ai-vue-root .acx-ai-item .acx-st{font-size:9px;color:#8B9495;margin-top:4px;display:flex;align-items:center;gap:4px}
+    #autocx-ai-vue-root .acx-ai-item .acx-st i{width:5px;height:5px;border-radius:50%;background:#2F8F5B;display:inline-block;flex:none}
+    #autocx-ai-vue-root .acx-ai-item .acx-st.acx-live i{background:#C2453A;animation:acx-pulse 1.4s infinite}
+    #autocx-ai-vue-root .acx-ai-item .acx-st.acx-bad i{background:#C2453A}
     @keyframes acx-pulse{0%,100%{box-shadow:0 0 0 0 rgba(194,69,58,.4)}50%{box-shadow:0 0 0 4px rgba(194,69,58,0)}}
     #autocx-ai-vue-root .acx-ai-rail-foot{padding:10px 14px 12px;border-top:1px solid rgba(30,42,47,.12);font-size:9.5px;color:#7C8688}
-    #autocx-ai-vue-root .acx-ai-rail-foot .bar{height:3px;background:rgba(30,42,47,.12);margin:6px 0}
-    #autocx-ai-vue-root .acx-ai-rail-foot .bar i{display:block;height:100%;background:#C2453A}
-    #autocx-ai-vue-root .acx-ai-rail-foot .row{display:flex;justify-content:space-between}
-    #autocx-ai-vue-root .acx-ai-rail-foot .row b{color:#1E2A2F;font-weight:600}
+    #autocx-ai-vue-root .acx-ai-rail-foot .acx-bar{height:3px;background:rgba(30,42,47,.12);margin:6px 0}
+    #autocx-ai-vue-root .acx-ai-rail-foot .acx-bar i{display:block;height:100%;background:#C2453A}
+    #autocx-ai-vue-root .acx-ai-rail-foot .acx-row{display:flex;justify-content:space-between}
+    #autocx-ai-vue-root .acx-ai-rail-foot .acx-row b{color:#1E2A2F;font-weight:600}
     #autocx-ai-vue-root .acx-ai-maincol{flex:1;min-width:0;display:flex;flex-direction:column}
     #autocx-ai-vue-root .acx-ai-session{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:11px 22px 10px 30px;font-size:9.5px;color:#7C8688;border-bottom:1px dotted rgba(30,42,47,.2)}
     #autocx-ai-vue-root .acx-ai-session b{color:#2E5A75;font-weight:500}
-    #autocx-ai-vue-root .acx-ai-session .sm{border:1px solid rgba(30,42,47,.14);padding:1px 6px;color:#5C6B6E}
+    #autocx-ai-vue-root .acx-ai-session .acx-sm{border:1px solid rgba(30,42,47,.14);padding:1px 6px;color:#5C6B6E}
     #autocx-ai-vue-root .acx-ai-thread{flex:1;overflow:auto;padding:12px 24px 6px 30px;position:relative;scrollbar-width:thin}
     #autocx-ai-vue-root .acx-ai-thread::before{content:"";position:absolute;left:18px;top:0;bottom:0;width:1px;background:rgba(194,69,58,.25)}
     #autocx-ai-vue-root .acx-ai-empty{color:#8B9495;font-size:11px;line-height:1.9;padding:8px 0}
@@ -813,11 +814,11 @@
     #autocx-ai-vue-root .acx-ai-receipt i{width:6px;height:6px;border-radius:50%;background:#B9C0BB;display:inline-block}
     #autocx-ai-vue-root .acx-ai-req{border-top:1px solid rgba(30,42,47,.13);padding:9px 0}
     #autocx-ai-vue-root .acx-ai-req-row{display:flex;align-items:center;gap:8px;font-size:9.5px;color:#7C8688;cursor:pointer;flex-wrap:wrap}
-    #autocx-ai-vue-root .acx-ai-req-row .who{color:#5C6B6E}
-    #autocx-ai-vue-root .acx-ai-req-row .arrow{color:#C2453A}
-    #autocx-ai-vue-root .acx-ai-req-row .m{font-variant-numeric:tabular-nums}
-    #autocx-ai-vue-root .acx-ai-req-row .caret{margin-left:auto;color:#8B9495;font-size:9px;transform:rotate(90deg)}
-    #autocx-ai-vue-root .acx-ai-req.open .caret{transform:rotate(-90deg)}
+    #autocx-ai-vue-root .acx-ai-req-row .acx-who{color:#5C6B6E}
+    #autocx-ai-vue-root .acx-ai-req-row .acx-arrow{color:#C2453A}
+    #autocx-ai-vue-root .acx-ai-req-row .acx-m{font-variant-numeric:tabular-nums}
+    #autocx-ai-vue-root .acx-ai-req-row .acx-caret{margin-left:auto;color:#8B9495;font-size:9px;transform:rotate(90deg)}
+    #autocx-ai-vue-root .acx-ai-req.acx-open .acx-caret{transform:rotate(-90deg)}
     #autocx-ai-vue-root .acx-ai-req-body{display:none;padding-top:7px}
     #autocx-ai-vue-root .acx-ai-req.open .acx-ai-req-body{display:block}
     #autocx-ai-vue-root .acx-ai-req-body pre{font:10px/1.6 Consolas,"Courier New",monospace;color:#4C5A5E;white-space:pre-wrap;word-break:break-word;margin:0}
@@ -825,28 +826,28 @@
     #autocx-ai-vue-root .acx-ai-tags span{font-size:9px;border:1px solid rgba(30,42,47,.16);padding:1px 5px;color:#5C6B6E}
     #autocx-ai-vue-root .acx-ai-think{border-top:1px solid rgba(30,42,47,.13);padding:9px 0}
     #autocx-ai-vue-root .acx-ai-think-head{display:flex;align-items:center;gap:6px;font-size:9.5px;font-weight:600;color:#C2453A;margin-bottom:4px;cursor:pointer}
-    #autocx-ai-vue-root .acx-ai-think-head .time{font-weight:400;color:#A78B4A;font-variant-numeric:tabular-nums}
-    #autocx-ai-vue-root .acx-ai-think-head .caret{margin-left:auto;color:#8B9495;font-size:9px;transform:rotate(90deg)}
-    #autocx-ai-vue-root .acx-ai-think.collapsed .acx-ai-think-body{display:none}
-    #autocx-ai-vue-root .acx-ai-think.collapsed .caret{transform:rotate(0)}
+    #autocx-ai-vue-root .acx-ai-think-head .acx-time{font-weight:400;color:#A78B4A;font-variant-numeric:tabular-nums}
+    #autocx-ai-vue-root .acx-ai-think-head .acx-caret{margin-left:auto;color:#8B9495;font-size:9px;transform:rotate(90deg)}
+    #autocx-ai-vue-root .acx-ai-think.acx-collapsed .acx-ai-think-body{display:none}
+    #autocx-ai-vue-root .acx-ai-think.acx-collapsed .acx-caret{transform:rotate(0)}
     #autocx-ai-vue-root .acx-ai-think-body{margin:0;font-size:10.5px;line-height:1.7;color:#334246;white-space:pre-wrap;word-break:break-word;
       background:linear-gradient(transparent 2px,rgba(233,196,106,.38) 2px,rgba(233,196,106,.38) 9px,transparent 9px)}
     #autocx-ai-vue-root .acx-ai-cursor{display:inline-block;width:6px;height:13px;background:#C2453A;vertical-align:-2px;margin-left:2px;animation:acx-blink 1s steps(2) infinite}
     @keyframes acx-blink{50%{opacity:0}}
     #autocx-ai-vue-root .acx-ai-ans{border-top:1px solid rgba(30,42,47,.13);padding:9px 0}
     #autocx-ai-vue-root .acx-ai-ans-head{display:flex;align-items:center;gap:6px;font-size:9.5px;font-weight:600;color:#C2453A;margin-bottom:4px}
-    #autocx-ai-vue-root .acx-ai-ans-head .time{font-weight:400;color:#8B9495}
+    #autocx-ai-vue-root .acx-ai-ans-head .acx-time{font-weight:400;color:#8B9495}
     #autocx-ai-vue-root .acx-ai-ans-body{margin:0;font-size:10.5px;line-height:1.7;color:#1E2A2F;white-space:pre-wrap;word-break:break-word}
-    #autocx-ai-vue-root .acx-ai-ans-body.pending{color:#8B9495}
+    #autocx-ai-vue-root .acx-ai-ans-body.acx-pending{color:#8B9495}
     #autocx-ai-vue-root .acx-ai-answer-line{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
     #autocx-ai-vue-root .acx-ai-key{display:inline-block;background:#C2453A;color:#FFF9F0;font:700 15px/1 Georgia,serif;padding:3px 7px}
-    #autocx-ai-vue-root .acx-ai-key.bad{background:#8B9495}
+    #autocx-ai-vue-root .acx-ai-key.acx-bad{background:#8B9495}
     #autocx-ai-vue-root .acx-ai-okn{color:#2F6B4E;font-size:9.5px}
     #autocx-ai-vue-root .acx-ai-badn{color:#C2453A;font-size:9.5px}
     #autocx-ai-vue-root .acx-ai-err{border:1px dashed rgba(194,69,58,.45);background:rgba(194,69,58,.035);padding:8px 10px;font-size:10.5px;line-height:1.7;color:#8A3A31;margin-top:8px}
     #autocx-ai-vue-root .acx-ai-err b{color:#C2453A}
     #autocx-ai-vue-root .acx-ai-foot2{display:flex;align-items:center;gap:10px;padding-top:7px;border-top:1px dotted rgba(30,42,47,.18);margin-top:8px;font-size:9px;color:#8B9495}
-    #autocx-ai-vue-root .acx-ai-foot2 .acts{margin-left:auto}
+    #autocx-ai-vue-root .acx-ai-foot2 .acx-acts{margin-left:auto}
     #autocx-ai-vue-root .acx-ai-foot2 button{border:0;background:none;color:#7C8688;font-size:9.5px;cursor:pointer;padding:2px 5px}
     #autocx-ai-vue-root .acx-ai-foot2 button:hover{color:#C2453A}
     #autocx-ai-vue-root .acx-ai-submit-strip{padding:0 24px 8px 30px}
@@ -855,11 +856,11 @@
     #autocx-ai-vue-root .acx-ai-submit-card ul{margin:2px 0 0;padding-left:14px}
     #autocx-ai-vue-root .acx-ai-note{flex:none;display:flex;align-items:center;gap:6px;border-top:1px solid rgba(30,42,47,.15);padding:9px 20px 9px 30px;background:#F7F7F0;font-size:9px;color:#8B9495}
     #autocx-ai-vue-root .acx-ai-note b{color:#7C8688;font-weight:600;margin-right:2px}
-    #autocx-ai-vue-root .acx-ai-note .right{margin-left:auto;display:flex;gap:12px}
+    #autocx-ai-vue-root .acx-ai-note .acx-note-right{margin-left:auto;display:flex;gap:12px}
     #autocx-ai-vue-root .acx-ai-status{flex:none;display:flex;align-items:center;gap:9px;padding:8px 20px 9px 30px;border-top:1px solid rgba(194,69,58,.18);background:#FBF7EE;font-size:9.5px;color:#8A6A2F}
     #autocx-ai-vue-root .acx-ai-status b{color:#C2453A;font-weight:600}
-    #autocx-ai-vue-root .acx-ai-status .right{margin-left:auto;display:flex;gap:8px;color:#8B9099}
-    #autocx-ai-vue-root .acx-ai-status .pill{border:1px solid rgba(30,42,47,.14);padding:1px 6px;color:#5C6B6E}
+    #autocx-ai-vue-root .acx-ai-status .acx-status-right{margin-left:auto;display:flex;gap:8px;color:#8B9099}
+    #autocx-ai-vue-root .acx-ai-status .acx-pill{border:1px solid rgba(30,42,47,.14);padding:1px 6px;color:#5C6B6E}
     @media (prefers-reduced-motion:reduce){#autocx-ai-vue-root .acx-ai-cursor,#autocx-ai-vue-root .acx-ai-item .st.live i{animation:none}}
   `;
 
@@ -871,8 +872,8 @@
             <div class="acx-ai-seal">AI</div>
             <div class="acx-ai-title"><b>AI 作答记录</b><span>{{ meta.title || '等待测验…' }}</span></div>
             <div class="acx-ai-meta">
-              <span class="pill" v-if="meta.model">{{ meta.model }}</span>
-              <span class="pill" v-if="meta.effort">effort {{ meta.effort }}</span>
+              <span class="acx-pill" v-if="meta.model">{{ meta.model }}</span>
+              <span class="acx-pill" v-if="meta.effort">effort {{ meta.effort }}</span>
               <span>只读</span>
               <button class="acx-ai-copy" @click="copyAll" title="复制全部记录">⧉</button>
               <button class="acx-ai-close" @click="close" title="关闭 (Esc)">×</button>
@@ -882,26 +883,26 @@
             <aside class="acx-ai-rail">
               <div class="acx-ai-rail-head"><b>本次测验</b><span>{{ meta.concurrency ? meta.concurrency + ' 路并发' : '' }}</span></div>
               <div class="acx-ai-items" role="tablist" aria-orientation="vertical" aria-label="本次测验的题目">
-                <div v-for="n in s.order" :key="n" class="acx-ai-item" :class="{ on: currentN === n }" role="tab"
+                <div v-for="n in s.order" :key="n" class="acx-ai-item" :class="{ 'acx-on': currentN === n }" role="tab"
                   :aria-selected="currentN === n ? 'true' : 'false'" tabindex="0"
                   @click="selectQuestion(n)" @keydown.enter.prevent="selectQuestion(n)" @keydown.space.prevent="selectQuestion(n)">
-                  <div class="num">{{ pad2(n) }}</div>
-                  <div class="q">{{ (s.convs[n] && s.convs[n].stem) || '(读取中)' }}</div>
-                  <div class="st" :class="phaseInfo(s.convs[n] || { n: n, phase: 'queued' }).dot">
+                  <div class="acx-num">{{ pad2(n) }}</div>
+                  <div class="acx-q">{{ (s.convs[n] && s.convs[n].stem) || '(读取中)' }}</div>
+                  <div class="acx-st" :class="phaseInfo(s.convs[n] || { n: n, phase: 'queued' }).dot">
                     <i></i>{{ phaseInfo(s.convs[n] || { n: n, phase: 'queued' }).text }}
                   </div>
                 </div>
                 <div v-if="!s.order.length" class="acx-ai-empty" style="padding:8px 12px">暂无题目</div>
               </div>
               <div class="acx-ai-rail-foot">
-                <div class="row"><span>已答</span><b>{{ done }} / {{ total }}</b></div>
-                <div class="bar"><i :style="{ width: total ? Math.round(done / total * 100) + '%' : '0%' }"></i></div>
-                <div class="row"><span>{{ bad ? bad + ' 题失败' : (total - done > 0 ? (total - done) + ' 题未答' : '全部完成') }}</span><span>{{ s.meta && s.meta.submitState === 'off' ? '自动提交 关' : '' }}</span></div>
+                <div class="acx-row"><span>已答</span><b>{{ done }} / {{ total }}</b></div>
+                <div class="acx-bar"><i :style="{ width: total ? Math.round(done / total * 100) + '%' : '0%' }"></i></div>
+                <div class="acx-row"><span>{{ bad ? bad + ' 题失败' : (total - done > 0 ? (total - done) + ' 题未答' : '全部完成') }}</span><span>{{ s.meta && s.meta.submitState === 'off' ? '自动提交 关' : '' }}</span></div>
               </div>
             </aside>
             <main class="acx-ai-maincol">
               <div class="acx-ai-session" v-if="s.meta">
-                <b>提取</b><span class="sm">{{ (s.meta.count || 0) + ' 题 · ' + (s.meta.source || '未知来源') }}</span>
+                <b>提取</b><span class="acx-sm">{{ (s.meta.count || 0) + ' 题 · ' + (s.meta.source || '未知来源') }}</span>
                 <span v-if="s.meta.startAt">{{ fmtTime(s.meta.startAt) }}</span>
                 <span v-if="s.meta.answeredAt">→ 开始作答 {{ fmtTime(s.meta.answeredAt) }}</span>
                 <span v-if="s.meta.concurrency">→ 并发 {{ s.meta.concurrency }} 路</span>
@@ -925,13 +926,13 @@
 
                   <div v-if="active.phase === 'queued'" class="acx-ai-receipt"><i></i>排队中 —— 并发已占满，前面的题结束后自动开始</div>
                   <template v-else>
-                    <div class="acx-ai-req" :class="{ open: s.openReq[currentN] || active.phase === 'requesting' }">
+                    <div class="acx-ai-req" :class="{ 'acx-open': s.openReq[currentN] || active.phase === 'requesting' }">
                       <div class="acx-ai-req-row" @click="toggleReq(currentN)">
-                        <span class="who">脚本</span><span class="arrow">→</span>
-                        <span class="who">{{ (active.params && active.params.model) || 'model' }}</span>
-                        <span class="m">{{ fmtTime((active.t || {}).reqAt) }}</span>
-                        <span class="m">prompt {{ (active.prompt || '').length }} 字</span>
-                        <span class="caret">›</span>
+                        <span class="acx-who">脚本</span><span class="acx-arrow">→</span>
+                        <span class="acx-who">{{ (active.params && active.params.model) || 'model' }}</span>
+                        <span class="acx-m">{{ fmtTime((active.t || {}).reqAt) }}</span>
+                        <span class="acx-m">prompt {{ (active.prompt || '').length }} 字</span>
+                        <span class="acx-caret">›</span>
                       </div>
                       <div class="acx-ai-req-body">
                         <pre>{{ active.prompt || '(未记录 prompt)' }}</pre>
@@ -944,11 +945,11 @@
                       </div>
                     </div>
 
-                    <div v-if="active.thinking || active.phase === 'thinking' || active.phase === 'answering' || active.phase === 'parsed' || active.phase === 'filled'" class="acx-ai-think" :class="{ collapsed: s.openTurn[currentN] }">
+                    <div v-if="active.thinking || active.phase === 'thinking' || active.phase === 'answering' || active.phase === 'parsed' || active.phase === 'filled'" class="acx-ai-think" :class="{ 'acx-collapsed': s.openTurn[currentN] }">
                       <div class="acx-ai-think-head" @click="toggleThink(currentN)">
                         <span>{{ active.thinking ? (active.phase === 'thinking' ? '思考中' : '思考过程') : '该模型未返回思考过程' }}</span>
-                        <span class="time" v-if="active.thinking">{{ thinkTime(active) }}</span>
-                        <span class="caret" v-if="active.thinking">›</span>
+                        <span class="acx-time" v-if="active.thinking">{{ thinkTime(active) }}</span>
+                        <span class="acx-caret" v-if="active.thinking">›</span>
                       </div>
                       <p class="acx-ai-think-body" v-if="active.thinking">{{ active.thinking }}<span class="acx-ai-cursor" v-if="active.phase === 'thinking'"></span></p>
                       <p class="acx-ai-think-body" v-else-if="active.phase === 'thinking'">等待模型吐出第一个思考片段…</p>
@@ -959,10 +960,10 @@
                       <template v-if="active.error && active.error.hint"><br><span style="color:#8A6A2F">{{ active.error.hint }}</span></template>
                     </div>
                     <div v-else class="acx-ai-ans">
-                      <div class="acx-ai-ans-head"><span>回答</span><span class="time">{{ answerTime(active) }}</span></div>
-                      <p class="acx-ai-ans-body" :class="{ pending: !active.answer }">{{ active.answer || (active.phase === 'thinking' ? '模型还在想，回答会在这里逐字出现…' : '等待回答…') }}<span class="acx-ai-cursor" v-if="active.phase === 'answering'"></span></p>
+                      <div class="acx-ai-ans-head"><span>回答</span><span class="acx-time">{{ answerTime(active) }}</span></div>
+                      <p class="acx-ai-ans-body" :class="{ 'acx-pending': !active.answer }">{{ active.answer || (active.phase === 'thinking' ? '模型还在想，回答会在这里逐字出现…' : '等待回答…') }}<span class="acx-ai-cursor" v-if="active.phase === 'answering'"></span></p>
                       <div class="acx-ai-answer-line" v-if="active.result && active.result.display" style="margin-top:7px">
-                        <span class="acx-ai-key" :class="{ bad: active.result.ok === false }">{{ active.result.display }}</span>
+                        <span class="acx-ai-key" :class="{ 'acx-bad': active.result.ok === false }">{{ active.result.display }}</span>
                         <span v-if="active.result.normalized">解析 → {{ active.result.normalized }}</span>
                         <span class="acx-ai-okn" v-if="active.result.fillOk">✓ 已在页面上勾选</span>
                         <span class="acx-ai-okn" v-if="active.result.verifyOk === true">✓ 回读校验一致</span>
@@ -973,7 +974,7 @@
 
                   <div class="acx-ai-foot2">
                     <span>{{ metaText(active) }}</span>
-                    <span class="acts"><button @click="copyTurn(active)">复制本题</button></span>
+                    <span class="acx-acts"><button @click="copyTurn(active)">复制本题</button></span>
                   </div>
                 </div>
               </div>
@@ -984,12 +985,12 @@
                   <span v-else>{{ submitText }}</span>
                 </div>
               </div>
-              <div class="acx-ai-note"><b>只读记录</b><span>不提供输入，不改答案；模型输出按纯文本转义展示。</span><span class="right"><span>AutoCX v{{ version }}</span><a :href="repo.github" target="_blank" rel="noopener noreferrer">GitHub</a><span>MIT</span></span></div>
+              <div class="acx-ai-note"><b>只读记录</b><span>不提供输入，不改答案；模型输出按纯文本转义展示。</span><span class="acx-note-right"><span>AutoCX v{{ version }}</span><a :href="repo.github" target="_blank" rel="noopener noreferrer">GitHub</a><span>MIT</span></span></div>
             </main>
           </div>
           <footer class="acx-ai-status">
             <span v-html="statusHtml"></span>
-            <span class="right"><span class="pill" v-if="meta.keyTail">密钥 ●●●●{{ meta.keyTail }}</span><span class="pill" v-if="meta.host">{{ meta.host }}</span></span>
+            <span class="acx-status-right"><span class="acx-pill" v-if="meta.keyTail">密钥 ●●●●{{ meta.keyTail }}</span><span class="acx-pill" v-if="meta.host">{{ meta.host }}</span></span>
           </footer>
         </div>
       </div>
@@ -1067,12 +1068,12 @@
       const t = c.t || {};
       const now = view.now;
       if (c.phase === 'queued') return { dot: '', text: '排队中' };
-      if (c.phase === 'requesting') return { dot: 'live', text: '请求中 · ' + dur(now - (t.reqAt || now)) };
-      if (c.phase === 'thinking') return { dot: 'live', text: '思考中 · ' + dur(now - (t.reqAt || now)) };
-      if (c.phase === 'answering') return { dot: 'live', text: '回答中 · ' + dur(now - (t.reqAt || now)) };
-      if (c.phase === 'parsed') return { dot: 'live', text: '已解析 · ' + ((c.result && c.result.display) || '') };
-      if (c.phase === 'filled') return { dot: 'ok', text: '已完成 · ' + ((c.result && c.result.display) || '') + (c.result && c.result.fillOk ? ' · 已勾选' : '') };
-      if (c.phase === 'failed') return { dot: 'bad', text: '失败' + (c.error && c.error.message ? ' · ' + String(c.error.message).slice(0, 18) : '') };
+      if (c.phase === 'requesting') return { dot: 'acx-live', text: '请求中 · ' + dur(now - (t.reqAt || now)) };
+      if (c.phase === 'thinking') return { dot: 'acx-live', text: '思考中 · ' + dur(now - (t.reqAt || now)) };
+      if (c.phase === 'answering') return { dot: 'acx-live', text: '回答中 · ' + dur(now - (t.reqAt || now)) };
+      if (c.phase === 'parsed') return { dot: 'acx-live', text: '已解析 · ' + ((c.result && c.result.display) || '') };
+      if (c.phase === 'filled') return { dot: 'acx-ok', text: '已完成 · ' + ((c.result && c.result.display) || '') + (c.result && c.result.fillOk ? ' · 已勾选' : '') };
+      if (c.phase === 'failed') return { dot: 'acx-bad', text: '失败' + (c.error && c.error.message ? ' · ' + String(c.error.message).slice(0, 18) : '') };
       return { dot: '', text: c.phase || '' };
     }
     function liveIndex() { return view.order.find((n) => LIVE[(view.convs[n] || {}).phase]) || 0; }
@@ -1380,39 +1381,39 @@
     #autocx-vue-root .acx-title span{font-size:10px;color:#7C8688;margin-top:3px;letter-spacing:.12em}
     #autocx-vue-root .acx-switch{width:34px;height:18px;border:1px solid #1E2A2F;background:#FAFAF5;position:relative;cursor:pointer;padding:0}
     #autocx-vue-root .acx-switch i{position:absolute;top:2px;right:2px;width:12px;height:12px;background:#C2453A;transition:.15s}
-    #autocx-vue-root .acx-switch.off i{right:auto;left:2px;background:#B9C0BB}
+    #autocx-vue-root .acx-switch.acx-off i{right:auto;left:2px;background:#B9C0BB}
     #autocx-vue-root .acx-min{width:22px;height:20px;border:0;background:transparent;color:#7C8688;font-size:15px;line-height:1;cursor:pointer;padding:0;margin-left:2px}
     #autocx-vue-root .acx-min:hover{color:#C2453A}
     #autocx-vue-root .acx-head-rule{margin:0 18px 0 34px;border-top:2px solid #1E2A2F;border-bottom:1px solid rgba(194,69,58,.45);height:4px}
     #autocx-vue-root .acx-ledger{padding:12px 22px 9px 34px;display:flex;flex-direction:column;gap:2px}
     #autocx-vue-root .acx-ledger-row{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;cursor:pointer;user-select:none}
     #autocx-vue-root .acx-ledger-row + .acx-ledger-row{border-top:1px dotted rgba(30,42,47,.18)}
-    #autocx-vue-root .acx-ledger-row .glyph{width:15px;color:#C2453A;font-size:11px}
+    #autocx-vue-root .acx-ledger-row .acx-glyph{width:15px;color:#C2453A;font-size:11px}
     #autocx-vue-root .acx-ledger-row b{font-weight:600}
-    #autocx-vue-root .acx-ledger-row .leader{flex:1;border-bottom:1px dotted rgba(30,42,47,.22);margin:0 3px 3px}
+    #autocx-vue-root .acx-ledger-row .acx-leader{flex:1;border-bottom:1px dotted rgba(30,42,47,.22);margin:0 3px 3px}
     #autocx-vue-root .acx-ledger-row em{font-style:normal;color:#5C6B6E;font-size:11px;font-variant-numeric:tabular-nums}
-    #autocx-vue-root .acx-ledger-row em.live{color:#C2453A}
-    #autocx-vue-root .acx-ledger-row em.off{color:#A2AAA8}
+    #autocx-vue-root .acx-ledger-row em.acx-live{color:#C2453A}
+    #autocx-vue-root .acx-ledger-row em.acx-off{color:#A2AAA8}
     /* ---------- 页签 ---------- */
     #autocx-vue-root .acx-tabs{display:flex;align-items:flex-end;gap:3px;padding:10px 18px 0 34px}
     #autocx-vue-root .acx-tab{font-size:11.5px;padding:5px 11px 6px;background:#EFF0E8;color:#5F6B6D;border:1px solid rgba(30,42,47,.16);border-bottom:0;
       border-radius:3px 3px 0 0;cursor:pointer}
-    #autocx-vue-root .acx-tab.on{background:#FAFAF5;color:#C2453A;border-top:2px solid #C2453A;font-weight:600;padding-top:4px}
+    #autocx-vue-root .acx-tab.acx-on{background:#FAFAF5;color:#C2453A;border-top:2px solid #C2453A;font-weight:600;padding-top:4px}
     /* ---------- 正文 ---------- */
     #autocx-vue-root .acx-body{flex:1;border-top:1px solid rgba(30,42,47,.18);margin:0 18px 0 34px;padding:11px 4px 10px 0;overflow:auto;scrollbar-width:thin}
     #autocx-vue-root .acx-empty{color:#8B9495;font-size:11px;line-height:1.8;padding:6px 0}
     #autocx-vue-root .acx-status-item{padding:6px 0;border-bottom:1px solid rgba(30,42,47,.07);font-size:10.5px;color:#334246}
-    #autocx-vue-root .acx-status-item .badge{display:inline-block;padding:1px 6px;border-radius:4px;color:#fff;font-size:9.5px;margin-right:6px;background:#8B9495}
-    #autocx-vue-root .acx-status-item .badge.video{background:#2E5A75}
-    #autocx-vue-root .acx-status-item .badge.quiz{background:#8B5CF6}
-    #autocx-vue-root .acx-status-item .badge.knowledge{background:#2F6B4E}
-    #autocx-vue-root .acx-status-item .badge.advance{background:#B7791F}
-    #autocx-vue-root .acx-status-item .badge.doc{background:#2C7A7B}
-    #autocx-vue-root .acx-status-item .t{color:#8B9495;font-size:9.5px;margin-top:2px}
+    #autocx-vue-root .acx-status-item .acx-badge{display:inline-block;padding:1px 6px;border-radius:4px;color:#fff;font-size:9.5px;margin-right:6px;background:#8B9495}
+    #autocx-vue-root .acx-badge.acx-badge-video{background:#2E5A75}
+    #autocx-vue-root .acx-badge.acx-badge-quiz{background:#8B5CF6}
+    #autocx-vue-root .acx-badge.acx-badge-knowledge{background:#2F6B4E}
+    #autocx-vue-root .acx-badge.acx-badge-advance{background:#B7791F}
+    #autocx-vue-root .acx-badge.acx-badge-doc{background:#2C7A7B}
+    #autocx-vue-root .acx-status-item .acx-t{color:#8B9495;font-size:9.5px;margin-top:2px}
     #autocx-vue-root .acx-log{font-size:10px;color:#4C5A5E}
     #autocx-vue-root .acx-log div{padding:3px 0;border-bottom:1px solid rgba(30,42,47,.06);word-break:break-all}
-    #autocx-vue-root .acx-log .warn{color:#A05A34}
-    #autocx-vue-root .acx-log .error{color:#C2453A}
+    #autocx-vue-root .acx-log .acx-log-warn{color:#A05A34}
+    #autocx-vue-root .acx-log .acx-log-error{color:#C2453A}
     /* ---------- 设置 ---------- */
     #autocx-vue-root .acx-set-group{padding:2px 0 8px}
     #autocx-vue-root .acx-set-group + .acx-set-group{border-top:1px dotted rgba(30,42,47,.18);padding-top:10px}
@@ -1429,7 +1430,7 @@
     #autocx-vue-root .acx-field .ant-select-arrow{color:#7C8688;font-size:9px}
     #autocx-vue-root .acx-toggle{width:32px;height:16px;border:1px solid #1E2A2F;background:#FAFAF5;position:relative;cursor:pointer;padding:0;flex:none}
     #autocx-vue-root .acx-toggle i{position:absolute;top:2px;right:2px;width:10px;height:10px;background:#C2453A}
-    #autocx-vue-root .acx-toggle.off i{right:auto;left:2px;background:#B9C0BB}
+    #autocx-vue-root .acx-toggle.acx-off i{right:auto;left:2px;background:#B9C0BB}
     #autocx-vue-root .acx-inline{display:flex;align-items:center;gap:8px;font-size:10.5px;color:#4C5A5E;margin:6px 0 9px;cursor:pointer;user-select:none}
     #autocx-vue-root .acx-inline .acx-toggle{margin-left:auto}
     #autocx-vue-root .acx-note{font-size:9.5px;color:#8B9495;line-height:1.5;margin-top:2px}
@@ -1439,14 +1440,14 @@
     #autocx-vue-root .acx-test{margin-top:6px;font-size:10px;line-height:1.5;color:#5C6B6E}
     /* ---------- 页脚 ---------- */
     #autocx-vue-root .acx-foot{display:flex;align-items:center;gap:10px;padding:8px 20px 9px 34px;font-size:9.5px;color:#8B9495;border-top:1px solid rgba(30,42,47,.09)}
-    #autocx-vue-root .acx-foot .right{margin-left:auto;display:flex;gap:8px}
+    #autocx-vue-root .acx-foot .acx-foot-links{margin-left:auto;display:flex;gap:8px}
     #autocx-vue-root .acx-foot a{color:#8B9495;text-decoration:none}
     #autocx-vue-root .acx-foot a:hover{color:#C2453A}
     /* ---------- 书签 ---------- */
     #autocx-vue-root .acx-bookmark{position:fixed;right:0;top:31%;width:28px;height:124px;background:#FAFAF5;border:1px solid rgba(30,42,47,.25);border-right:0;
       box-shadow:0 8px 22px rgba(30,42,47,.18);display:flex;flex-direction:column;align-items:center;padding:9px 0 8px;cursor:pointer;
       font:600 9px/1.2 Georgia,"Songti SC",serif;color:#1E2A2F;letter-spacing:.08em;user-select:none;touch-action:none}
-    #autocx-vue-root .acx-bookmark.dragging{cursor:grabbing;box-shadow:0 12px 28px rgba(30,42,47,.28)}
+    #autocx-vue-root .acx-bookmark.acx-dragging{cursor:grabbing;box-shadow:0 12px 28px rgba(30,42,47,.28)}
     #autocx-vue-root .acx-bookmark::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:#C2453A}
     #autocx-vue-root .acx-bm-text{writing-mode:vertical-rl;text-orientation:mixed;letter-spacing:.16em}
     #autocx-vue-root .acx-bm-bar{width:3px;flex:1;background:rgba(30,42,47,.1);margin:7px 0;position:relative}
@@ -1454,11 +1455,11 @@
     #autocx-vue-root .acx-bm-pct{margin-top:auto;color:#C2453A;font:600 11px/1 "Bahnschrift",sans-serif}
     #autocx-vue-root .acx-bm-menu{display:none;position:absolute;right:34px;top:0;width:248px;background:#FAFAF5;border:1px solid rgba(30,42,47,.24);box-shadow:0 14px 32px rgba(30,42,47,.18);padding:6px}
     #autocx-vue-root .acx-bookmark:hover .acx-bm-menu{display:block}
-    #autocx-vue-root .acx-bm-menu .mi{display:flex;align-items:center;justify-content:space-between;padding:9px 10px;font-size:11px;color:#334246;border-bottom:1px dotted rgba(30,42,47,.14);cursor:pointer}
-    #autocx-vue-root .acx-bm-menu .mi:last-child{border-bottom:0}
-    #autocx-vue-root .acx-bm-menu .mi:hover{background:#F2F3EA}
-    #autocx-vue-root .acx-bm-menu .mi b{font-weight:500;color:#C2453A;font-size:10px}
-    #autocx-vue-root .acx-bm-menu .mi .st{color:#8B9495;font-size:10px}
+    #autocx-vue-root .acx-bm-menu .acx-bm-mi{display:flex;align-items:center;justify-content:space-between;padding:9px 10px;font-size:11px;color:#334246;border-bottom:1px dotted rgba(30,42,47,.14);cursor:pointer}
+    #autocx-vue-root .acx-bm-menu .acx-bm-mi:last-child{border-bottom:0}
+    #autocx-vue-root .acx-bm-menu .acx-bm-mi:hover{background:#F2F3EA}
+    #autocx-vue-root .acx-bm-menu .acx-bm-mi b{font-weight:500;color:#C2453A;font-size:10px}
+    #autocx-vue-root .acx-bm-menu .acx-bm-mi .acx-bm-st{color:#8B9495;font-size:10px}
     /* ---------- AntD 下拉层 ---------- */
     .ant-select-dropdown{z-index:2147483647!important;font-size:11px}
     .ant-select-item{font-size:11px!important}
@@ -1468,18 +1469,18 @@
   const PANEL_TEMPLATE = `
     <a-config-provider :theme="antdTheme">
       <div class="acx-ui">
-        <div v-if="!panelOpen" class="acx-bookmark" :class="{ dragging: bookmarkDragging }" :style="bookmarkStyle"
+        <div v-if="!panelOpen" class="acx-bookmark" :class="{ 'acx-dragging': bookmarkDragging }" :style="bookmarkStyle"
           @pointerdown="startBookmarkDrag" @keydown.enter.prevent="panelOpen = true" @keydown.space.prevent="panelOpen = true"
           tabindex="0" role="button" title="单击展开；上下拖动可移动">
           <span class="acx-bm-text">AutoCX</span>
           <span class="acx-bm-bar"><i :style="{ height: progress + '%' }"></i></span>
           <span class="acx-bm-pct">{{ progress || '—' }}</span>
           <div class="acx-bm-menu" @pointerdown.stop @click.stop>
-            <div class="mi" @click="panelOpen = true"><span>展开面板</span><span class="st">›</span></div>
-            <div class="mi" @click="toggleAssist('video')"><span>看课助手</span><b>{{ assistVideo ? '已开启' : '已关闭' }}</b></div>
-            <div class="mi" @click="toggleAssist('quiz')"><span>答题助手</span><b>{{ assistQuiz ? '已开启' : '已关闭' }}</b></div>
-            <div class="mi" @click="openAI"><span>答题记录</span><span class="st">›</span></div>
-            <div class="mi" @click="toggleMain"><span>总开关</span><b>{{ enabled ? '已开启' : '已关闭' }}</b></div>
+            <div class="acx-bm-mi" @click="panelOpen = true"><span>展开面板</span><span class="acx-bm-st">›</span></div>
+            <div class="acx-bm-mi" @click="toggleAssist('video')"><span>看课助手</span><b>{{ assistVideo ? '已开启' : '已关闭' }}</b></div>
+            <div class="acx-bm-mi" @click="toggleAssist('quiz')"><span>答题助手</span><b>{{ assistQuiz ? '已开启' : '已关闭' }}</b></div>
+            <div class="acx-bm-mi" @click="openAI"><span>答题记录</span><span class="acx-bm-st">›</span></div>
+            <div class="acx-bm-mi" @click="toggleMain"><span>总开关</span><b>{{ enabled ? '已开启' : '已关闭' }}</b></div>
           </div>
         </div>
 
@@ -1491,37 +1492,37 @@
               <div class="acx-title"><strong>AutoCX</strong><span>学习通助手</span></div>
             </div>
             <div class="acx-head-tools">
-              <button class="acx-switch" :class="{ off: !enabled }" @click="toggleMain" :title="enabled ? '总开关：开' : '总开关：关'"><i></i></button>
+              <button class="acx-switch" :class="{ 'acx-off': !enabled }" @click="toggleMain" :title="enabled ? '总开关：开' : '总开关：关'"><i></i></button>
               <button class="acx-min" @click="collapsePanel" title="收起为书签">—</button>
             </div>
           </header>
           <div class="acx-head-rule"></div>
           <div class="acx-ledger">
             <div class="acx-ledger-row" @click="toggleAssist('video')">
-              <span class="glyph">▶</span><b>看课助手</b><span class="leader"></span>
-              <em :class="assistVideo ? 'live' : 'off'">{{ assistVideo ? videoState : '已关闭' }}</em>
+              <span class="acx-glyph">▶</span><b>看课助手</b><span class="acx-leader"></span>
+              <em :class="assistVideo ? 'acx-live' : 'acx-off'">{{ assistVideo ? videoState : '已关闭' }}</em>
             </div>
             <div class="acx-ledger-row" @click="toggleAssist('quiz')">
-              <span class="glyph">✎</span><b>答题助手</b><span class="leader"></span>
-              <em :class="assistQuiz ? '' : 'off'">{{ assistQuiz ? quizState : '已关闭' }}</em>
+              <span class="acx-glyph">✎</span><b>答题助手</b><span class="acx-leader"></span>
+              <em :class="assistQuiz ? '' : 'acx-off'">{{ assistQuiz ? quizState : '已关闭' }}</em>
             </div>
           </div>
           <nav class="acx-tabs">
-            <button v-for="t in tabs" :key="t.key" class="acx-tab" :class="{ on: activeTab === t.key }" @click="activeTab = t.key">{{ t.label }}</button>
+            <button v-for="t in tabs" :key="t.key" class="acx-tab" :class="{ 'acx-on': activeTab === t.key }" @click="activeTab = t.key">{{ t.label }}</button>
           </nav>
           <div class="acx-body" ref="bodyEl">
             <template v-if="activeTab === 'status'">
               <div v-if="!statuses.length" class="acx-empty">等待任务帧上报…</div>
               <div v-for="(s, i) in statuses" :key="i" class="acx-status-item">
-                <span class="badge" :class="s.module">{{ s.module }}</span>{{ s.state }} {{ s.detail }}
-                <div class="t">{{ fmtTime(s.ts) }} · {{ s.frame }}</div>
+                <span class="acx-badge" :class="'acx-badge-' + s.module">{{ s.module }}</span>{{ s.state }} {{ s.detail }}
+                <div class="acx-t">{{ fmtTime(s.ts) }} · {{ s.frame }}</div>
               </div>
             </template>
 
             <template v-else-if="activeTab === 'log'">
               <div v-if="!logs.length" class="acx-empty">还没有日志。任务帧跑起来后会在这里汇总。</div>
               <div class="acx-log" ref="logEl">
-                <div v-for="(l, i) in logs" :key="i" :class="l.level">{{ l.time }} [{{ l.module }}] {{ l.msg }}</div>
+                <div v-for="(l, i) in logs" :key="i" :class="'acx-log-' + l.level">{{ l.time }} [{{ l.module }}] {{ l.msg }}</div>
               </div>
             </template>
 
@@ -1544,31 +1545,31 @@
                 <div class="acx-field"><label>模型</label><a-input v-model:value="settings['llm.model']" @change="saveCfg('llm.model')"></a-input></div>
                 <div class="acx-field"><label>思考强度</label>
                   <div style="display:flex;gap:2px;flex-wrap:wrap">
-                    <button v-for="e in effortOptions" :key="e.value" class="acx-tab" :class="{ on: settings['llm.effort'] === e.value }" style="font-size:10px;padding:3px 9px;border:1px solid rgba(30,42,47,.24);border-radius:0" @click="setEffort(e.value)">{{ e.label }}</button>
+                    <button v-for="e in effortOptions" :key="e.value" class="acx-tab" :class="{ 'acx-on': settings['llm.effort'] === e.value }" style="font-size:10px;padding:3px 9px;border:1px solid rgba(30,42,47,.24);border-radius:0" @click="setEffort(e.value)">{{ e.label }}</button>
                   </div>
                 </div>
                 <div class="acx-field"><label>停滞超时（秒）</label><input type="number" min="15" max="600" v-model.number="settings['llm.timeout']" @change="saveCfg('llm.timeout')"></div>
-                <div class="acx-inline" @click="toggleCfg('llm.stream')">流式接收<span class="acx-toggle" :class="{ off: !settings['llm.stream'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('llm.stream')">流式接收<span class="acx-toggle" :class="{ 'acx-off': !settings['llm.stream'] }"><i></i></span></div>
               </div>
               <div class="acx-set-group">
                 <h4>看课</h4>
                 <div class="acx-field"><label>视频倍速</label><input type="number" min="1" max="16" v-model.number="settings['video.speed']" @change="saveCfg('video.speed')"></div>
-                <div class="acx-inline" @click="toggleCfg('video.mute')">静音<span class="acx-toggle" :class="{ off: !settings['video.mute'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('video.mute')">静音<span class="acx-toggle" :class="{ 'acx-off': !settings['video.mute'] }"><i></i></span></div>
                 <div class="acx-field"><label>翻页间隔（秒）</label><input type="number" min="1" max="10" v-model.number="settings['doc.interval']" @change="saveCfg('doc.interval')"></div>
               </div>
               <div class="acx-set-group">
                 <h4>答题</h4>
-                <div class="acx-inline" @click="toggleCfg('quiz.auto_fill')">自动勾选<span class="acx-toggle" :class="{ off: !settings['quiz.auto_fill'] }"><i></i></span></div>
-                <div class="acx-inline" @click="toggleCfg('quiz.auto_submit')">自动提交<span class="acx-toggle" :class="{ off: !settings['quiz.auto_submit'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('quiz.auto_fill')">自动勾选<span class="acx-toggle" :class="{ 'acx-off': !settings['quiz.auto_fill'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('quiz.auto_submit')">自动提交<span class="acx-toggle" :class="{ 'acx-off': !settings['quiz.auto_submit'] }"><i></i></span></div>
                 <div class="acx-note">只有全部题目答完且解码置信度足够时才提交。</div>
-                <div class="acx-inline" @click="toggleCfg('quiz.double_check')">两答一致性校验<span class="acx-toggle" :class="{ off: !settings['quiz.double_check'] }"><i></i></span></div>
-                <div class="acx-inline" @click="toggleCfg('quiz.auto_submit_work')">作业自动提交<span class="acx-toggle" :class="{ off: !settings['quiz.auto_submit_work'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('quiz.double_check')">两答一致性校验<span class="acx-toggle" :class="{ 'acx-off': !settings['quiz.double_check'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('quiz.auto_submit_work')">作业自动提交<span class="acx-toggle" :class="{ 'acx-off': !settings['quiz.auto_submit_work'] }"><i></i></span></div>
               </div>
               <div class="acx-set-group">
                 <h4>字体与调试</h4>
-                <div class="acx-inline" @click="toggleCfg('llm.vision')">视觉兜底<span class="acx-toggle" :class="{ off: !settings['llm.vision'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('llm.vision')">视觉兜底<span class="acx-toggle" :class="{ 'acx-off': !settings['llm.vision'] }"><i></i></span></div>
                 <div class="acx-field"><label>参考库地址</label><a-input v-model:value="settings['font.refdb_url']" placeholder="留空=内联一级字库" @change="saveCfg('font.refdb_url')"></a-input></div>
-                <div class="acx-inline" @click="toggleCfg('debug')">调试日志<span class="acx-toggle" :class="{ off: !settings['debug'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('debug')">调试日志<span class="acx-toggle" :class="{ 'acx-off': !settings['debug'] }"><i></i></span></div>
                 <button class="acx-btn" style="margin-top:4px" :disabled="testingVision" @click="testVision">{{ testingVision ? '测试中…' : '测试多模态' }}</button>
                 <div class="acx-test">{{ visionResult }}</div>
                 <button class="acx-btn" style="margin-top:8px" :disabled="testingLLM" @click="testLLM">{{ testingLLM ? '测试中…' : '测试 LLM 连接' }}</button>
@@ -1576,7 +1577,7 @@
               </div>
             </template>
           </div>
-          <footer class="acx-foot"><span>AutoCX v{{ version }}</span><span class="right"><a :href="repo.github" target="_blank" rel="noopener noreferrer">GitHub</a><a :href="repo.gitee" target="_blank" rel="noopener noreferrer">Gitee</a><a :href="repo.issues" target="_blank" rel="noopener noreferrer">反馈</a><span>MIT</span></span></footer>
+          <footer class="acx-foot"><span>AutoCX v{{ version }}</span><span class="acx-foot-links"><a :href="repo.github" target="_blank" rel="noopener noreferrer">GitHub</a><a :href="repo.gitee" target="_blank" rel="noopener noreferrer">Gitee</a><a :href="repo.issues" target="_blank" rel="noopener noreferrer">反馈</a><span>MIT</span></span></footer>
         </section>
       </div>
     </a-config-provider>
@@ -1895,7 +1896,9 @@
             // 跳过分节标题(firstLayer:如"4 造型艺术"这类章标题,没有任务点)
             if ($it.hasClass('firstLayer') || $it.find('.posCatalog_name').length === 0) continue;
             if (!$it.find('.icon_Completed').length) {
-              const nameEl = $it.find('.posCatalog_name').get(0) || $it.get(0);
+              const nameEl = $it.find('.posCatalog_name').get(0);
+              // 未解锁的章节没有 onclick(点了也不会加载),跳过
+              if (!nameEl || !nameEl.getAttribute('onclick')) continue;
               nameEl.click();
               const title = $it.text().replace(/\s+/g, ' ').trim().slice(0, 40);
               log.info('advance', '切换到: ' + title);
@@ -1905,8 +1908,17 @@
             }
           }
           if (!clicked) {
-            log.info('advance', '后面没有未完成任务了 🎉');
-            report('advance', 'all-done', '全部任务已完成');
+            const locked = $('.posCatalog_select').filter(function () {
+              const $n = $(this).find('.posCatalog_name');
+              return $n.length && !$n.get(0).getAttribute('onclick');
+            }).length;
+            if (locked) {
+              log.warn('advance', '剩余章节未解锁,无法继续自动学习(需先完成当前章节的人工任务点)');
+              report('advance', 'locked', '剩余章节未解锁,需人工完成当前章节');
+            } else {
+              log.info('advance', '后面没有未完成任务了 🎉');
+              report('advance', 'all-done', '全部任务已完成');
+            }
           }
         } catch (e) {
           log.error('advance', '自动推进失败: ' + e.message);
@@ -1920,13 +1932,62 @@
     setInterval(() => tryAdvance('poll'), 4000);
     // 2) 章内任务点切换:任务帧完成 -> 点击下一个任务标签(视频 -> 章节测验…)
     let taskSwitching = false;
-    const tryNextTask = () => {
+    // 整章兜底:本章任务点跑完但平台仍没标完成(有只能人工做的任务点)时,别卡死在这一章
+    let lastForceChapter = 0;
+    const forceNextChapter = (reason) => {
+      const now = Date.now();
+      if (now - lastForceChapter < 45000) return; // 45 秒内不重复强推
+      lastForceChapter = now;
+      const skipToNext = () => {
+        const $cur = $('.posCatalog_select.posCatalog_active');
+        if (!$cur.length) return;
+        if ($cur.find('.icon_Completed').length) { tryAdvance('poll'); return; } // 已完成,走正常流程
+        const $items = $('.posCatalog_select');
+        const idx = $items.index($cur.get(0));
+        for (let i = idx + 1; i < $items.length; i++) {
+          const $it = $items.eq(i);
+          if ($it.hasClass('firstLayer') || $it.find('.posCatalog_name').length === 0) continue;
+          if (!$it.find('.icon_Completed').length) {
+            const nameEl = $it.find('.posCatalog_name').get(0);
+            if (!nameEl || !nameEl.getAttribute('onclick')) continue; // 未解锁,点不动
+            const title = $it.text().replace(/\s+/g, ' ').trim().slice(0, 40);
+            nameEl.click();
+            log.info('advance', '本章仍未标记完成(' + reason + '),继续下一章: ' + title);
+            report('advance', 'next-chapter-skip', '继续下一章: ' + title);
+            return;
+          }
+        }
+        const locked = $('.posCatalog_select').filter(function () {
+          const $n = $(this).find('.posCatalog_name');
+          return $n.length && !$n.get(0).getAttribute('onclick');
+        }).length;
+        if (locked) {
+          log.warn('advance', '本章有需人工完成的任务点,后续章节未解锁,自动学习到此为止');
+          report('advance', 'locked', '后续章节未解锁,需人工完成当前章节');
+        } else {
+          log.info('advance', '后面没有未完成章节了 🎉');
+          report('advance', 'all-done', '全部章节已完成');
+        }
+      };
+      // 先给平台留出标记完成的时间(10~13s),还没标完成再等一轮(15s)才跳过
+      setTimeout(() => {
+        try {
+          const $cur = $('.posCatalog_select.posCatalog_active');
+          if ($cur && $cur.find('.icon_Completed').length) { tryAdvance('poll'); return; }
+        } catch (e) { log.error('advance', '章节状态检查失败: ' + e.message); }
+        setTimeout(() => {
+          try { skipToNext(); } catch (e) { log.error('advance', '章节推进失败: ' + e.message); }
+        }, 15000);
+      }, 10000 + Math.round(Math.random() * 3000));
+    };
+    const tryNextTask = (reason) => {
       if (taskSwitching || !isEnabled()) return;
       const $tabs = $('li[onclick*="changeDisplayContent"]');
-      if ($tabs.length < 2) return; // 单任务章节,交给整章推进
+      if ($tabs.length < 2) { forceNextChapter(reason || '任务'); return; } // 单任务章节,交给整章推进
       const cur = $tabs.index($tabs.filter('.active').get(0));
+      if (cur < 0) return; // 页面正在切换,等下一轮
       const $next = $tabs.eq(cur + 1);
-      if (!$next.length) return;    // 已是最后一个任务,交给整章推进
+      if (!$next.length) { forceNextChapter(reason || '任务'); return; } // 已是最后一个任务,交给整章推进
       taskSwitching = true;
       setTimeout(() => {
         try {
@@ -1941,10 +2002,38 @@
         }
       }, 1500 + Math.round(Math.random() * 1500));
     };
-    // 3) 任务帧事件:knowledge 帧的完成标记(权威) / 视频 ended(兜底)
+    // 3) 任务帧事件:knowledge 帧的完成标记(权威) / 视频 ended(兜底) / 只能人工的任务点(跳过)
+    //    只处理"当前章节"的事件:GM 存储是全局的,别的标签页/别的章节的任务帧也会往里写。
+    const currentChapterId = () => {
+      try {
+        const el = document.querySelector('.posCatalog_select.posCatalog_active .posCatalog_name');
+        const oc = (el && el.getAttribute('onclick')) || '';
+        const m = oc.match(/getTeacherAjax\('[^']*','[^']*','(\d+)'\)/);
+        if (m) return m[1];
+        const q = location.search.match(/chapterId=(\d+)/);
+        return q ? q[1] : null;
+      } catch (_) { return null; }
+    };
+    const eventMatchesChapter = (nv) => {
+      const cur = currentChapterId();
+      if (!cur) return true;                       // 取不到当前章节 -> 不做过滤
+      const href = String((nv && nv.href) || '');
+      if (!href) return true;                     // 旧版本事件没有 href -> 放行
+      const kid = href.match(/knowledgeid=(\d+)/);
+      if (kid) return kid[1] === cur;
+      const cid = href.match(/chapterId=(\d+)/);
+      if (cid) return cid[1] === cur;
+      return true;                                // 帧 URL 里没有章节信息(如视频帧) -> 放行
+    };
     GM_addValueChangeListener(STATUS_KEY, (_k, _o, nv, remote) => {
       if (!remote || !nv) return;
-      if (nv.state === 'job-done' || nv.state === 'done') tryNextTask();
+      if (!eventMatchesChapter(nv)) return;
+      if (nv.state === 'job-done' || nv.state === 'done' ||
+          nv.state === 'job-idle' || nv.state === 'submitted') {
+        tryNextTask(nv.state);
+      }
+      // 视频帧没找到 video 元素(播放器挂了)也别死等,换下一个任务点
+      if (nv.module === 'video' && nv.state === 'error') tryNextTask('video-error');
       if (nv.state === 'done') tryAdvance('done-event');
     });
   }
@@ -3226,18 +3315,39 @@
   }
 
   /* ============================== knowledge-frame ========================= */
-  // 任务点容器帧:轮询 .ans-job-finished(权威完成标记),上报给顶层切换任务
+  // 任务点容器帧:轮询 .ans-job-finished(权威完成标记),上报给顶层切换任务。
+  // 兜底:卡片里既没有完成标记,也没有可自动处理的嵌套帧(视频/文档/测验)时,
+  // 说明这个任务点只能人工做(例如「自主学习资料」只有外链),否则助手会永远卡在这一页。
+  // 这时上报 job-idle,让顶层换到下一个任务点(该任务点仍需人工完成,平台侧保持未完成)。
   function initKnowledgeFrame() {
     const module = 'knowledge';
     spoofVisibility();
+    const AUTO_FRAME = /\/ananas\/modules\/(video|audio|pdf|ppt|pptdemo|innertemplet|book|read|work)/i;
+    const started = Date.now();
     let reported = false;
+    const hasAutoFrame = () => {
+      try {
+        if (document.querySelector('video')) return true; // 本帧内嵌播放器
+        return Array.prototype.some.call(document.querySelectorAll('iframe'), (f) => AUTO_FRAME.test(f.src || ''));
+      } catch (_) { return false; }
+    };
+    const hasDocUI = () => {
+      try { return !!document.querySelector('.imglook_next, .page-next'); } catch (_) { return false; }
+    };
     const check = () => {
       if (reported) return;
       if (document.querySelector('.ans-job-finished')) {
         reported = true;
         log.info(module, '检测到任务点完成标记(.ans-job-finished)');
         report(module, 'job-done', '当前任务点已完成');
+        return;
       }
+      // 兜底:25 秒后仍看不到可自动处理的嵌套帧 -> 判定为「只能人工」的任务点
+      if (Date.now() - started < 25000) return;
+      if (hasAutoFrame() || hasDocUI()) return;
+      reported = true;
+      log.warn(module, '该任务点没有可自动完成的内容(需人工),上报跳过');
+      report(module, 'job-idle', '该任务点无可自动完成的内容,跳过');
     };
     setInterval(check, 3000);
     setTimeout(check, 1500);
