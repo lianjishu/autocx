@@ -92,5 +92,35 @@ for (const [input, expect] of valueCases) {
   ok ? pass++ : fail++;
 }
 
+// ---- buildMultimodalContent:组 OpenAI 兼容的 content 字段 ----
+// 纯文本 → 字符串;带图 → [文本, 图, 图…]
+eval(extractFn('buildMultimodalContent'));
+const mmCases = [
+  // [opts, 期望形态]
+  [{ image: 'data:image/png;base64,AAA' }, 'multi'],
+  [{ images: ['u1', 'u2'] }, 'multi'],
+  [{ image: 'u1', images: ['u1', 'u2'] }, 'multi'], // 同一个不重复
+  [{}, 'text'],
+  [{ image: '' }, 'text'],
+  [{ images: [] }, 'text'],
+];
+for (const [opts, kind] of mmCases) {
+  const r = buildMultimodalContent('题干文本', opts);
+  let ok;
+  if (kind === 'text') {
+    ok = (r === '题干文本');
+  } else {
+    ok = Array.isArray(r) && r[0].type === 'text' && r[0].text === '题干文本'
+      && r.slice(1).every((p) => p.type === 'image_url' && typeof p.image_url.url === 'string');
+    // 图片不应重复
+    if (ok) {
+      const urls = r.slice(1).map((p) => p.image_url.url);
+      ok = new Set(urls).size === urls.length;
+    }
+  }
+  console.log(`${ok ? 'PASS' : 'FAIL'} buildMultimodalContent(${JSON.stringify(opts)}) → ${JSON.stringify(r).slice(0, 120)}`);
+  ok ? pass++ : fail++;
+}
+
 console.log(`\n${pass}/${pass + fail} 通过`);
 process.exit(fail ? 1 : 0);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      1.0.8
+// @version      1.0.9
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验/作业/随堂练习答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -639,6 +639,23 @@
   // OpenAI 兼容客户端;GM_xmlhttpRequest 自带跨域。
   // 采用 SSE 流式接收:模型每吐 token 都算活跃(推理模型的思考 token 同样流动),
   // 只在"停滞超时"内完全无数据才判负——思考再久也不算失败;HTTP 错误码立即判负。
+  /**
+   * 组多模态 content:纯文本时返回字符串,带图时返回 [文本, 图, 图…]。
+   * 图可以是单个 data URL(opts.image)或一组(opts.images)。
+   */
+  function buildMultimodalContent(prompt, opts) {
+    const o = opts || {};
+    const imgs = [];
+    if (o.image) imgs.push(o.image);
+    if (Array.isArray(o.images)) {
+      o.images.forEach((u) => { if (u && imgs.indexOf(u) < 0) imgs.push(u); });
+    }
+    if (!imgs.length) return prompt;
+    const parts = [{ type: 'text', text: prompt }];
+    imgs.forEach((u) => parts.push({ type: 'image_url', image_url: { url: u } }));
+    return parts;
+  }
+
   const llm = {
     /**
      * 发送单轮对话(流式),返回文本内容
@@ -659,13 +676,8 @@
           model,
           messages: [{
             role: 'user',
-            // opts.image 存在时走多模态:content 从字符串换成 [文本, 图片] 数组
-            content: (opts && opts.image)
-              ? [
-                { type: 'text', text: prompt },
-                { type: 'image_url', image_url: { url: opts.image } },
-              ]
-              : prompt,
+            // opts.image / opts.images 存在时走多模态:content 从字符串换成 [文本, 图片...] 数组
+            content: buildMultimodalContent(prompt, opts),
           }],
           temperature: 0.1,
           stream: true,
@@ -782,6 +794,10 @@
     /** 多模态:同一模型、同一密钥，只是 content 换成 [文本, 图片] */
     vision(prompt, dataUrl, opts) {
       return this.chat(prompt, Object.assign({ image: dataUrl }, opts || {}));
+    },
+    /** 多模态多图:dataUrls 可以是数组 */
+    visionMany(prompt, dataUrls, opts) {
+      return this.chat(prompt, Object.assign({ images: dataUrls }, opts || {}));
     },
   };
 
@@ -909,10 +925,17 @@
     #autocx-ai-vue-root .acx-ai-req-row .acx-caret{margin-left:auto;color:#8B9495;font-size:9px;transform:rotate(90deg)}
     #autocx-ai-vue-root .acx-ai-req.acx-open .acx-caret{transform:rotate(-90deg)}
     #autocx-ai-vue-root .acx-ai-req-body{display:none;padding-top:7px}
-    #autocx-ai-vue-root .acx-ai-req.open .acx-ai-req-body{display:block}
+    /* 注意:模板里绑的是 acx-open(见 :class),这里必须跟着写 acx-open。
+       之前误写成 .open,导致"脚本→模型"那块的请求体(prompt/参数/题图)永远展开不了。 */
+    #autocx-ai-vue-root .acx-ai-req.acx-open .acx-ai-req-body{display:block}
     #autocx-ai-vue-root .acx-ai-req-body pre{font:10px/1.6 Consolas,"Courier New",monospace;color:#4C5A5E;white-space:pre-wrap;word-break:break-word;margin:0}
     #autocx-ai-vue-root .acx-ai-tags{display:flex;gap:5px;margin-top:7px;flex-wrap:wrap}
     #autocx-ai-vue-root .acx-ai-tags span{font-size:9px;border:1px solid rgba(30,42,47,.16);padding:1px 5px;color:#5C6B6E}
+    /* 题图:让"到底有没有把图发给模型"一眼可见,而不是只能看纯文本 prompt */
+    #autocx-ai-vue-root .acx-ai-imgs{margin-top:8px;padding:6px;border:1px dashed rgba(30,42,47,.22);background:rgba(255,255,255,.55)}
+    #autocx-ai-vue-root .acx-ai-img-tag{display:inline-block;font-size:10px;color:#8A6A2F;background:rgba(214,158,46,.16);border:1px solid rgba(214,158,46,.4);padding:1px 6px;margin-bottom:6px}
+    #autocx-ai-vue-root .acx-ai-img-link{display:inline-block;margin:0 6px 4px 0;line-height:0}
+    #autocx-ai-vue-root .acx-ai-img-link img{max-width:190px;max-height:130px;border:1px solid rgba(30,42,47,.25);background:#fff}
     #autocx-ai-vue-root .acx-ai-think{border-top:1px solid rgba(30,42,47,.13);padding:9px 0}
     #autocx-ai-vue-root .acx-ai-think-head{display:flex;align-items:center;gap:6px;font-size:9.5px;font-weight:600;color:#C2453A;margin-bottom:4px;cursor:pointer}
     #autocx-ai-vue-root .acx-ai-think-head .acx-time{font-weight:400;color:#A78B4A;font-variant-numeric:tabular-nums}
@@ -925,6 +948,7 @@
     @keyframes acx-blink{50%{opacity:0}}
     #autocx-ai-vue-root .acx-ai-ans{border-top:1px solid rgba(30,42,47,.13);padding:9px 0}
     #autocx-ai-vue-root .acx-ai-ans-head{display:flex;align-items:center;gap:6px;font-size:9.5px;font-weight:600;color:#C2453A;margin-bottom:4px}
+    #autocx-ai-vue-root .acx-ai-ans-head em{font-style:normal;font-weight:400;color:#8A6A2F;background:rgba(214,158,46,.16);border:1px solid rgba(214,158,46,.35);padding:0 5px}
     #autocx-ai-vue-root .acx-ai-ans-head .acx-time{font-weight:400;color:#8B9495}
     #autocx-ai-vue-root .acx-ai-ans-body{margin:0;font-size:10.5px;line-height:1.7;color:#1E2A2F;white-space:pre-wrap;word-break:break-word}
     #autocx-ai-vue-root .acx-ai-ans-body.acx-pending{color:#8B9495}
@@ -1023,8 +1047,14 @@
                         <span class="acx-m">prompt {{ (active.prompt || '').length }} 字</span>
                         <span class="acx-caret">›</span>
                       </div>
-                      <div class="acx-ai-req-body">
+                        <div class="acx-ai-req-body">
                         <pre>{{ active.prompt || '(未记录 prompt)' }}</pre>
+                        <div v-if="active.params && active.params.images && active.params.images.length" class="acx-ai-imgs">
+                          <span class="acx-ai-img-tag">已附题图 {{ active.params.images.length }} 张</span>
+                          <a v-for="(u, ui) in active.params.images" :key="ui" :href="u" target="_blank" rel="noreferrer" class="acx-ai-img-link">
+                            <img :src="u" :alt="'题图' + (ui + 1)" @error="$event.target.style.visibility='hidden'" />
+                          </a>
+                        </div>
                         <div class="acx-ai-tags">
                           <span v-if="active.params && active.params.temperature != null">temperature {{ active.params.temperature }}</span>
                           <span>stream: {{ active.streamed === false ? 'false' : 'true' }}</span>
@@ -1048,8 +1078,12 @@
                       <b>失败</b> · 第 {{ active.attempt || 1 }} 次尝试<br>{{ (active.error && active.error.message) || '未知错误' }}
                       <template v-if="active.error && active.error.hint"><br><span style="color:#8A6A2F">{{ active.error.hint }}</span></template>
                     </div>
-                    <div v-else class="acx-ai-ans">
-                      <div class="acx-ai-ans-head"><span>回答</span><span class="acx-time">{{ answerTime(active) }}</span></div>
+                    <!-- 失败时也要把模型答案摆出来:转人工的意义就是让人看到并自行采纳 -->
+                    <div class="acx-ai-ans" v-if="active.phase !== 'failed' || active.answer">
+                      <div class="acx-ai-ans-head">
+                        <span>回答<em v-if="active.phase === 'failed'">（未采纳，仅供参考）</em></span>
+                        <span class="acx-time">{{ answerTime(active) }}</span>
+                      </div>
                       <p class="acx-ai-ans-body" :class="{ 'acx-pending': !active.answer }">{{ active.answer || (active.phase === 'thinking' ? '模型还在想，回答会在这里逐字出现…' : '等待回答…') }}<span class="acx-ai-cursor" v-if="active.phase === 'answering'"></span></p>
                       <div class="acx-ai-answer-line" v-if="active.result && active.result.display" style="margin-top:7px">
                         <span class="acx-ai-key" :class="{ 'acx-bad': active.result.ok === false }">{{ active.result.display }}</span>
@@ -2514,6 +2548,13 @@
   function buildPrompt(q) {
     const typeName = { single: '单选题', multi: '多选题', judge: '判断题', blank: '填空题', subjective: '简答题' }[q.type];
     let p = `请回答下面这道${typeName}。\n题目:${q.stem}\n`;
+    // 题干里有图时必须说明:一是提醒模型去看图(部分模型对"裸图"权重不足),
+    // 二是让记录窗口里的 prompt 本身就能看出这次带了图。
+    const nImg = (q.images || []).length;
+    if (nImg > 0) {
+      p += `(本题干含 ${nImg} 张图片,已随本消息附上,必须结合图片内容作答;`
+        + `图片里的表格/数字/图示是题目的一部分,不要臆造图片里没有的字段。)\n`;
+    }
     const unknown = (q.decode && q.decode.unknown) || '';
     if (unknown) {
       p += `(个别字符未能还原:${unknown};若不影响理解请忽略,否则按上下文推断)\n`;
@@ -3515,6 +3556,35 @@
         report(module, 'error', '题目提取失败');
         return;
       }
+      // 存一份,供调试钩子核对"到底有没有把题图找出来"
+      try {
+        const pw = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        pw.__autocxPractice = {
+          questions: () => questions.map((q) => ({
+            index: q.index, type: q.type, stem: q.stem,
+            images: q.images, options: q.options.map((o) => o.label + '.' + o.text.slice(0, 30)),
+          })),
+          // 实测:把题图真的取一遍,返回是否成功与 dataURL 大小
+          async probeImage(i) {
+            const q = questions[i || 0];
+            if (!q || !q.images || !q.images.length) return { ok: false, reason: 'no-image' };
+            const url = q.images[0];
+            try {
+              const r = await fetch(url, { credentials: 'omit' });
+              const blob = await r.blob();
+              const durl = await new Promise((res) => {
+                const fr = new FileReader();
+                fr.onload = () => res(String(fr.result || ''));
+                fr.onerror = () => res('');
+                fr.readAsDataURL(blob);
+              });
+              return { ok: durl.length > 100, url, status: r.status, type: blob.type, size: blob.size, durlLen: durl.length };
+            } catch (e) {
+              return { ok: false, url, error: String(e && e.message || e) };
+            }
+          },
+        };
+      } catch (e) { log.debug(module, '调试钩子暴露失败: ' + e.message); }
       log.info(module, `共 ${questions.length} 题,来源: 页面接口明文`);
       report(module, 'extracted', `提取到 ${questions.length} 题`);
 
@@ -3570,33 +3640,7 @@
           c.t.doneAt = 0;
           writer(q.index).write(convSnapshot(c), true);
           try {
-            // 主观题可能带图片(如"给出下表的范式分析"),纯文本看不到图,改走多模态
-            let st = null;
-            if (q.type === 'subjective' && q.images && q.images.length && config.get('llm.vision') !== false) {
-              const png = await fetchImageDataUrl(q.images[0]);
-              if (png) {
-                log.info(module, `题目${q.index} 含图片,走多模态作答`);
-                const txt = await llm.vision(c.prompt, png);
-                st = { thinking: '', answer: txt, usage: null, streamed: false };
-              }
-            }
-            if (!st) {
-              st = await llm.stream(c.prompt, {
-                onThinking: (text, s) => {
-                  c.phase = 'thinking';
-                  c.thinking = s.thinking;
-                  if (!c.t.firstThinkAt) c.t.firstThinkAt = Date.now();
-                  writer(q.index).write(convSnapshot(c));
-                },
-                onAnswer: (text, s) => {
-                  c.phase = 'answering';
-                  c.answer = s.answer;
-                  c.streamed = s.streamed !== false;
-                  if (!c.t.firstAnswerAt) c.t.firstAnswerAt = Date.now();
-                  writer(q.index).write(convSnapshot(c));
-                },
-              }).promise;
-            }
+            const st = await askModel(q, c.prompt, c, writer, q.index);
             c.thinking = st.thinking;
             c.answer = st.answer;
             c.usage = st.usage || null;
@@ -3636,9 +3680,8 @@
               setPracticeBadge(q, `复核中(${parsed.display})…`, 'thinking');
               c.phase = 'rechecking';
               writer(q.index).write(convSnapshot(c));
-              const st2 = await llm.stream(c.prompt, {
-                onThinking: () => {}, onAnswer: () => {},
-              }).promise;
+              // 复核必须走和主答一样的通道(带图就带图),否则两次看到的信息不同,必然判成不一致
+              const st2 = await askModel(q, c.prompt, null, writer, q.index);
               const parsed2 = parseAnswer(q, st2.answer);
               const consistent = parsed2.ok && parsed2.normalized === parsed.normalized;
               c.recheck = {
@@ -3668,18 +3711,23 @@
               let judged = '';
               try {
                 const judgePrompt =
-                  '下面是对一道题的回答。请判断它是否正确且完整地回答了题目。'
-                  + '只要结论正确、要点齐全就算通过,措辞风格不影响。\n'
+                  '下面是对一道题的回答。请判断它是否正确地回答了题目。\n'
+                  + '判据:结论正确、要点覆盖到题目问到的每一问即可通过;'
+                  + '措辞风格、条理形式、是否分条都不影响。\n'
+                  + '只有出现事实性错误(结论错、编造题干里没有的条件)才判不通过。\n'
                   + '只回复"通过"或"不通过"三个字,不要其它内容。\n\n'
                   + `题目:\n${String(q.stem || '').slice(0, 1500)}\n\n`
                   + `回答:\n${String(parsed.normalized || '').slice(0, 2500)}`;
                 // 题干带图时,自评也要看图,否则模型无法判断"图里的表"答对了没有
-                let png = null;
+                let pngs = [];
                 if (q.images && q.images.length && config.get('llm.vision') !== false) {
-                  png = await fetchImageDataUrl(q.images[0]);
+                  for (const u of q.images.slice(0, 4)) {
+                    const d = await fetchImageDataUrl(u);
+                    if (d) pngs.push(d);
+                  }
                 }
-                judged = png
-                  ? await llm.vision(judgePrompt, png)
+                judged = pngs.length
+                  ? await llm.visionMany(judgePrompt, pngs)
                   : await llm.chat(judgePrompt);
               } catch (e) {
                 log.warn(module, `题目${q.index} 自评调用失败: ${e.message}`);
@@ -3832,17 +3880,26 @@
     async function fetchImageDataUrl(url) {
       try {
         const r = await fetch(url, { credentials: 'omit' });
-        if (!r.ok) return null;
+        if (!r.ok) {
+          log.warn(module, `题图读取失败:HTTP ${r.status} ${url}`);
+          return null;
+        }
         const blob = await r.blob();
-        if (!/^image\//.test(blob.type || '')) return null;
-        return await new Promise((resolve) => {
+        if (!/^image\//.test(blob.type || '')) {
+          log.warn(module, `题图不是图片(${blob.type}):${url}`);
+          return null;
+        }
+        const durl = await new Promise((resolve) => {
           const fr = new FileReader();
           fr.onload = () => resolve(String(fr.result || ''));
-          fr.onerror = () => resolve(null);
+          fr.onerror = () => resolve('');
           fr.readAsDataURL(blob);
         });
+        if (!durl) log.warn(module, `题图转 dataURL 失败:${url}`);
+        return durl || null;
       } catch (e) {
-        log.debug(module, '图片读取失败: ' + e.message);
+        // 这里必须是 warn 而不是 debug:取不到图会退化成"纯文本瞎猜",不能悄悄发生
+        log.warn(module, `题图读取异常(${e.message}):${url}`);
         return null;
       }
     }
@@ -3957,6 +4014,55 @@
         });
       });
       return out;
+    }
+
+    /**
+     * 发一次请求。
+     * 题干带图就走多模态 —— 主答和复核必须用同一条通道:
+     * 若主答带图、复核不带图,模型两次看到的信息不同,复核必然"不一致",
+     * 于是带图的题永远被判成存疑、永远填不上。
+     */
+    async function askModel(q, prompt, c, writer, index) {
+      if (q.images && q.images.length && config.get('llm.vision') !== false) {
+        // 逐张取图,取到几张算几张;一张都取不到才算退化成纯文本
+        const dataUrls = [];
+        for (const u of q.images.slice(0, 4)) {
+          const d = await fetchImageDataUrl(u);
+          if (d) dataUrls.push(d);
+        }
+        if (dataUrls.length) {
+          log.info(module, `题目${q.index} 含题图(${dataUrls.length}/${q.images.length} 张已附上),走多模态作答`);
+          if (c) {
+            c.params = Object.assign({}, c.params, { images: q.images.slice(), vision: true });
+            writer(index).write(convSnapshot(c), true);
+          }
+          const txt = await llm.visionMany(prompt, dataUrls);
+          return { thinking: '', answer: txt, usage: null, streamed: false };
+        }
+        // 取不到图就明说,不能静默降级成"纯文本作答" —— 那种情况下模型是在瞎猜
+        log.warn(module, `题目${q.index} 题图取不到(${q.images.join(' , ')}),将退化为纯文本作答,答案可能不可靠`);
+        if (c) {
+          c.params = Object.assign({}, c.params, { images: [], imageFailed: q.images.join(' , ') });
+          writer(index).write(convSnapshot(c), true);
+        }
+      }
+      return llm.stream(prompt, {
+        onThinking: (text, s) => {
+          if (!c) return;
+          c.phase = 'thinking';
+          c.thinking = s.thinking;
+          if (!c.t.firstThinkAt) c.t.firstThinkAt = Date.now();
+          writer(index).write(convSnapshot(c));
+        },
+        onAnswer: (text, s) => {
+          if (!c) return;
+          c.phase = 'answering';
+          c.answer = s.answer;
+          c.streamed = s.streamed !== false;
+          if (!c.t.firstAnswerAt) c.t.firstAnswerAt = Date.now();
+          writer(index).write(convSnapshot(c));
+        },
+      }).promise;
     }
 
     /** 取本题在 vm.questionList 里的对象(用 vueIndex,不靠 index 反推) */
