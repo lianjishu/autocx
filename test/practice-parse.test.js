@@ -122,5 +122,29 @@ for (const [opts, kind] of mmCases) {
   ok ? pass++ : fail++;
 }
 
+// ---- 章节测验页的选项"显示字母"与"平台取值"必须分开 ----
+// 页面显示 A/B/C/D 给用户看,平台把 span.num_option[data] 存进 #answer<qid>。
+// 单选/多选 data 是字母,判断题 data 是 "true"/"false"。
+// 之前一律拿 data 当字母,判断题就变成 label="true",模型回的 "A" 谁都匹配不上 → 填写异常。
+eval(extractFn('optionLabelOf'));
+eval(extractFn('optionValueOf'));
+const letterCases = [
+  // [data, 显示文字, 位置, 期望label, 期望value]
+  ['true', 'A', 0, 'A', 'true'],       // 判断题第一项
+  ['false', 'B', 1, 'B', 'false'],     // 判断题第二项
+  ['A', 'A', 0, 'A', 'A'],             // 普通单选
+  ['C', 'A', 0, 'A', 'C'],             // 页面错位:data=C, 显示=A
+  ['', 'A', 0, 'A', 'A'],              // 没有 data
+  ['', '', 2, 'C', 'C'],               // 什么都没有,按位置推
+  ['b', 'b', 1, 'B', 'b'],             // 小写显示字母
+];
+for (const [data, disp, i, expLabel, expValue] of letterCases) {
+  const label = optionLabelOf(disp, i);
+  const value = optionValueOf(data, label);
+  const ok = label === expLabel && value === expValue;
+  console.log(`${ok ? 'PASS' : 'FAIL'} 显示字母/平台取值 data=${JSON.stringify(data)} 显示=${JSON.stringify(disp)} → label=${label} value=${value} (期望 ${expLabel}/${expValue})`);
+  ok ? pass++ : fail++;
+}
+
 console.log(`\n${pass}/${pass + fail} 通过`);
 process.exit(fail ? 1 : 0);

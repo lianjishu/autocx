@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      1.0.9
+// @version      1.0.10
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验/作业/随堂练习答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -2559,12 +2559,13 @@
     if (unknown) {
       p += `(个别字符未能还原:${unknown};若不影响理解请忽略,否则按上下文推断)\n`;
     }
-    if (q.type === 'judge') {
-      // 判断题的选项文案各平台不一(有的"对/错",有的"正确/错误"),
-      // 但语义固定:A=正确、B=错误。统一写死,免得模型拿到"对/错"猜错。
-      p += 'A、正确\nB、错误\n';
-    } else if (q.options.length) {
+    // 判断题要列出**页面上的真实选项**(有的页面是 True/False,有的平台选项名是 1/2),
+    // 写死"A、正确/B、错误"会在选项顺序或文案不同的页面上答反。
+    // 只有在完全拿不到选项时才退回 A、正确 / B、错误。
+    if (q.options.length) {
       p += q.options.map((o) => `${o.label}、${o.text}`).join('\n') + '\n';
+    } else if (q.type === 'judge') {
+      p += 'A、正确\nB、错误\n';
     }
     if (q.type === 'blank') {
       const n = Number(q.blankCount || 0);
@@ -3378,15 +3379,45 @@
     }
 
     /* ---------- 选项字母/文本:本版从 span[data] + a.after 取,避免字母混进正文 ---------- */
+    // 这里有两个"字母",不能混为一谈:
+    //   label —— 页面**显示**给用户看的字母(span.num_option 的文字,恒为 A/B/C/D)。
+    //           模型该按这个回答,学生也是看着这个选的。
+    //   value —— 平台**存进 #answer<qid>** 的值(span.num_option 的 data 属性):
+    //           单选/多选是 A/B/C/D,判断题却是 "true"/"false"。
+    // 之前一律拿 data 当字母,判断题就变成了 label="true",模型回的 "A" 匹配不上任何选项,
+    // 结果一个都没点中、回读为空 → 报"填写异常"。
+    // 另外个别页面的 data 与显示字母是错位的(如 data=C/显示=A),所以显示字母只认 span 文字。
+
+    /** 页面显示给用户的字母;拿不到就按位置推 */
+    function optionLabelOf(disp, i) {
+      const d = String(disp || '').trim();
+      if (/^[A-G]$/i.test(d)) return d.toUpperCase();
+      return String.fromCharCode(65 + i);
+    }
+
+    /** 平台真实存进 #answer<qid> 的值 */
+    function optionValueOf(data, label) {
+      const d = String(data || '').trim();
+      return d || label;
+    }
+
     function readOption(el, i) {
       const $el = $(el);
       const $letter = $el.find(SELECTORS.quiz.optionLetter).first();
-      const label = String($letter.attr('data') || '').trim() || String.fromCharCode(65 + i);
-      const $txt = $el.find(SELECTORS.quiz.optionText).first();
-      let text = $txt.length ? $txt.text() : $el.clone().find('label').remove().end().text();
+      const data = String($letter.attr('data') || '').trim();   // 平台真实取值
+      const disp = String($letter.text() || '').trim();          // 页面显示的字母
+      const $txt = $el.find('a.after').first();
+      const $txtAny = $txt.length ? $txt : $el.find('a').first();
+      let text = $txtAny.length ? $txtAny.text() : $el.clone().find('label').remove().end().text();
       text = text.replace(/\s+/g, ' ').trim();
-      if (!$txt.length) text = text.replace(/^[A-Z][、.\s]+/, '').trim();
-      return { label, text };
+      let label = optionLabelOf(disp, i);
+      if (!/^[A-G]$/i.test(disp) && !$txtAny.length) {
+        // 老版结构:字母写在正文开头(如 "A. 文本")
+        const m = text.match(/^([A-G])[、.\s]+/);
+        if (m) { label = m[1]; text = text.slice(m[0].length).trim(); }
+      }
+      const value = optionValueOf(data, label);
+      return { label, value, text };
     }
 
     /* ---------- 题目提取:DOM 降级 ---------- */
@@ -3408,16 +3439,15 @@
         if (!stem) return;
 
         const type = detectType($q, $q.text());
-        // 选项:必须"元素 / 字母 / 文本"三者一一对应。
-        // 2026 版里选项字母是打乱的(第一个 <li> 的 data 可能是 "C"),
-        // 若按位置算字母(65+i)会与提示词里的字母不一致 -> 点错选项还会"校验通过"。
-        // 故这里过滤空文本时同步过滤元素,并单独保存每个元素的真实字母。
+        // 选项:必须"元素 / 显示字母 / 平台取值 / 文本"一一对应。
+        // 显示字母给模型(学生看到的就是它),平台取值给页面(#answer<qid> 存的是它)。
         const optEls = pickOptionEls($q);
         const pairs = optEls.map((el, i) => ({ el, o: readOption(el, i) })).filter((p) => p.o.text);
         const options = pairs.map((p) => p.o);
         const optDoms = pairs.map((p) => p.el);
         const optLabels = pairs.map((p) => p.o.label);
-        out.push({ type, stem, options, dom: this, optDoms, optLabels, qid });
+        const optValues = pairs.map((p) => p.o.value);
+        out.push({ type, stem, options, dom: this, optDoms, optLabels, optValues, qid });
       });
       return out;
     }
@@ -4435,6 +4465,17 @@
           open: () => AIW.ensure().open(),
           close: () => { if (AIW.api) AIW.api.close(); },
           index: () => GM_getValue(AI_INDEX) || [],
+          // 当前生效的开关(排查"为什么自动提交了"这类问题用)
+          cfg: () => {
+            const o = {};
+            PANEL_SETTING_KEYS.forEach((k) => {
+              let v = config.get(k);
+              // API Key 只回显末 4 位
+              if (k === 'llm.api_key') v = '***' + String(v || '').slice(-4);
+              o[k] = v;
+            });
+            return o;
+          },
           demo: () => { const sid = seedDemo(); AIW.ensure().open(); return sid; },
           clear: (sid) => {
             const target = sid || 'demo';
