@@ -146,7 +146,7 @@ const { ConfigProvider, Input, Select, Switch, Button, Tooltip } = antd;
 - 展开/收起：右上角 `—` 收起为书签；点书签或悬停菜单「展开面板」恢复。
 - 拖拽：按住标题栏拖动；位置写入 `autocx.ballPos`；窗口 resize 时钳制回可视区。
 - 动画：面板展开 180ms `cubic-bezier(.2,.8,.2,1)` 的纸张滑出（`transform-origin: right bottom`）；`prefers-reduced-motion: reduce` 时关闭。
-- 书签：`28 × 124`，固定右缘；**可上下拖动**，位置写入 `autocx.bookmarkTop`；按下后位移 `< 5px` 松开判定为单击并展开面板，`≥ 5px` 判定为拖动、只移动不展开；Enter / Space 也可展开。悬停展开 248px 菜单（展开面板 / 看课助手 / 答题助手 / 答题记录 / 总开关）。
+- 书签：`28 × 124`，固定右缘；**默认 `cursor: pointer`**（拖动中短暂 `grabbing`），可上下拖动，位置写入 `autocx.bookmarkTop`；按下后位移 `< 5px` 松开判定为单击并展开面板，`≥ 5px` 判定为拖动、只移动不展开；Enter / Space 也可展开。悬停展开 248px 菜单（展开面板 / 看课助手 / 答题助手 / 答题记录 / 总开关）。
 
 ### 3.5 AI 作答记录窗口
 
