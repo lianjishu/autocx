@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>fontdec-inline-harness</title>
+<style>
+  body { font: 13px/1.6 system-ui, sans-serif; margin: 16px; }
+  #log { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<h3>内联参考库路径 · 解压 + 解码（模拟断网）</h3>
+<div id="log">running…</div>
+<div id="stage" hidden></div>
+
+<script src="./fixture-inline.js"></script>
+<script src="./fixture-art.js"></script>
+<script src="./fontdec-module.js"></script>
+<script>
+'use strict';
+const log = (s) => { document.getElementById('log').textContent += '\n' + s; };
+
+function b64ToBytes(b64) {
+  const bin = atob(String(b64 || ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+// 与脚本里 inflateInlineRefDb 等价的最短实现
+async function inflate(b64, meta) {
+  const gz = b64ToBytes(b64);
+  const stream = new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
+  const bin = new Uint8Array(await new Response(stream).arrayBuffer());
+  const maskLen = Math.ceil((meta.hi - meta.lo + 1) / 8);
+  return Object.assign({}, meta, {
+    cpMask: bytesToB64(bin.subarray(0, maskLen)),
+    bits: bytesToB64(bin.subarray(maskLen)),
+  });
+}
+
+async function main() {
+  const META = { v: 1, size: 24, lo: 0x4E00, hi: 0x9FA5 };
+  const t0 = performance.now();
+  const meta = await inflate(window.__INLINE_GZ, META);
+  const tInflate = performance.now() - t0;
+  log(`内联 payload ${(window.__INLINE_GZ.length / 1024).toFixed(0)} KB base64 → 解压 ${tInflate.toFixed(0)} ms`);
+
+  // 注入真实字体 + 密文节点（和 harness 一样）
+  const A = window.__ART;
+  const style = document.createElement('style');
+  style.textContent = `@font-face{font-family:font-cxsecret;src:url("data:application/font-ttf;charset=utf-8;base64,${A.font}")}
+    .font-cxsecret{font-family:font-cxsecret}`;
+  document.head.appendChild(style);
+  const stage = document.getElementById('stage');
+  stage.hidden = false;
+  A.cases.forEach(([cipher]) => {
+    const d = document.createElement('div');
+    d.className = 'font-cxsecret fontLabel';
+    d.textContent = cipher;
+    stage.appendChild(d);
+  });
+
+  const fd = createFontDeobfuscator({ doc: document, log: console, refDb: meta, minScore: 0.55, minMargin: 0.06 });
+  const st = await fd.build();
+  log('build: ' + JSON.stringify(st));
+  if (!st.ok) { window.__RESULT = { error: st.reason }; document.title = 'inline FAIL'; return; }
+
+  let ok = 0;
+  const bad = [];
+  A.cases.forEach(([cipher, expect]) => {
+    const r = fd.decode(cipher);
+    if (r.text === expect) ok++;
+    else bad.push({ cipher, expect, got: r.text });
+  });
+  const total = A.cases.length;
+  log(`\n用例 ${total}，正确 ${ok}，准确率 ${(ok / total * 100).toFixed(1)}%`);
+  if (bad.length) log('错例: ' + JSON.stringify(bad));
+
+  // 顺带量一次内存里的库大小
+  const dbBytes = (meta.bits.length * 0.75) + (meta.cpMask.length * 0.75);
+  log(`解压后库 ${(dbBytes / 1024).toFixed(0)} KiB`);
+
+  window.__RESULT = { ok, total, acc: +(ok / total).toFixed(4), inflateMs: +tInflate.toFixed(0), stats: st, bad: bad.slice(0, 10) };
+  document.title = `inline ${ok}/${total}`;
+  log('\nDONE');
+}
+
+main().catch((e) => {
+  window.__RESULT = { error: String(e && e.stack || e) };
+  log('ERROR ' + (e && e.stack || e));
+  document.title = 'inline ERROR';
+});
+</script>
+</body>
+</html>

@@ -1,2 +1,11 @@
 ABC学习通网课助手/
 docs/
+test/fontdec/fixture.js
+test/fontdec/captured/
+test/fontdec/fixture-art.js
+test/fontdec/fixture-inline.js
+test/fontdec/fontdec-module.js
+test/fontdec/refdb-*.bin
+test/fontdec/refdb-*.js
+test/ui/preview-*.png
+test/fontdec/vision-selfcheck.png

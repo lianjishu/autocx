@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>fontdec-harness</title>
+<style>
+  body { font: 13px/1.6 system-ui, sans-serif; margin: 16px; color: #111; }
+  #log { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 12px; }
+  .bad { color: #b91c1c; }
+  .ok { color: #15803d; }
+</style>
+</head>
+<body>
+<h3>字体解码模块 · 真字体 + 真密文 端到端测试</h3>
+<div id="log">running…</div>
+
+<!-- 模拟学习通测验页：@font-face 内嵌 + 带 .font-cxsecret 的题目节点 -->
+<div id="stage" hidden></div>
+
+<script src="./refdb-24.js"></script>
+<script src="./fixture-art.js"></script>
+<script src="./fontdec-module.js"></script>
+<script>
+'use strict';
+const log = (s) => { document.getElementById('log').innerHTML += '\n' + s; };
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+async function main() {
+  const A = window.__ART;
+  const stage = document.getElementById('stage');
+  stage.hidden = false;
+
+  // 1) 注入真实字体（MIME 用实测到的那个）
+  const style = document.createElement('style');
+  style.textContent = `@font-face{font-family:font-cxsecret;src:url("data:application/font-ttf;charset=utf-8;base64,${A.font}")}
+    .font-cxsecret{font-family:font-cxsecret}`;
+  document.head.appendChild(style);
+
+  // 2) 把密文塞进 DOM（模拟题干预/选项）
+  A.cases.forEach(([cipher], i) => {
+    const d = document.createElement('div');
+    d.className = 'font-cxsecret fontLabel';
+    d.textContent = cipher;
+    stage.appendChild(d);
+  });
+
+  const t0 = performance.now();
+  const fd = createFontDeobfuscator({
+    doc: document,
+    log: { warn: console.warn, info: console.log, debug: console.debug },
+    refDb: window.__CX_REFDB,
+    minScore: 0.5,
+    minMargin: 0.05,
+  });
+  const st = await fd.build();
+  log('build: ' + JSON.stringify(st));
+  if (!st.ok) { window.__RESULT = { error: st.reason }; return; }
+
+  const cm = fd.charMap();
+  // 3) 逐条解码比对
+  let ok = 0;
+  const bad = [];
+  const rows = [];
+  A.cases.forEach(([cipher, expect], i) => {
+    const r = fd.decode(cipher);
+    const pass = r.text === expect;
+    if (pass) ok++; else bad.push({ cipher, expect, got: r.text });
+    rows.push({ cipher, expect, got: r.text, conf: +r.conf.toFixed(3), mapped: r.mapped, total: r.total, pass });
+  });
+  const dt = performance.now() - t0;
+  log(`\n用例 ${A.cases.length}，正确 ${ok}，准确率 ${(ok / A.cases.length * 100).toFixed(1)}%，耗时 ${dt.toFixed(0)}ms`);
+  if (bad.length) log('错例: ' + JSON.stringify(bad, null, 0));
+  log('\n逐条:');
+  rows.forEach((r) => log(`  ${r.pass ? '✓' : '✗'} [${r.mapped}/${r.total} ${(r.conf * 100).toFixed(0)}%] ${r.cipher} → ${r.got}` + (r.pass ? '' : `  期望 ${r.expect}`)));
+
+  // 4) 分数字段（用于调阈值）
+  const scores = Object.values(cm).map((v) => ({ ch: String.fromCodePoint(v.cp), score: v.score, margin: v.margin, ok: v.ok }));
+  const low = scores.filter((s) => !s.ok);
+  const sorted = scores.slice().sort((a, b) => a.score - b.score);
+  log('\n字形分数字段（最低 8 个）: ' + sorted.slice(0, 8).map((s) => `${s.ch}:${s.score}`).join(' '));
+  log('低置信 ' + low.length + ' 个: ' + low.map((s) => `${s.ch}:${s.score}/${s.margin}`).join(' '));
+
+  window.__RESULT = {
+    ok, total: A.cases.length, acc: +(ok / A.cases.length).toFixed(4), ms: +dt.toFixed(0),
+    stats: st, bad, rows, chars: scores.length, low: low.length,
+  };
+  document.title = `harness ${ok}/${A.cases.length}`;
+  log('\nDONE');
+}
+
+main().catch((e) => {
+  window.__RESULT = { error: String(e && e.stack || e) };
+  log('ERROR ' + (e && e.stack || e));
+  document.title = 'harness ERROR';
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>AI 作答记录 · 单题视图（本地预览）</title>
+<link rel="stylesheet" href="./ai-window.css">
+<style>
+  /* ---------- 仅预览页用的“把窗口摆进页面” ---------- */
+  html, body { height: 100%; }
+  body.mock {
+    margin: 0; background: #EEF1F6; display: flex; align-items: center; justify-content: center;
+    font: 13px/1.5 -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  body.mock #autocx-ai { position: static; inset: auto; z-index: auto; }
+  body.mock #autocx-ai .cxai-win {
+    position: static; display: flex; width: min(1020px, calc(100vw - 28px));
+    height: min(720px, calc(100vh - 28px));
+  }
+
+  /* ---------- 本次改动新增的样式（将来并入脚本 CSS） ---------- */
+  /* 单题视图：正文区只放一题，导航固定在标题行右侧 */
+  #autocx-ai .cxai-nav { display: flex; align-items: center; gap: 2px; flex: none; }
+  #autocx-ai .cxai-nav button {
+    width: 22px; height: 22px; border: 1px solid #E8ECF3; background: #fff; color: #6B7688;
+    border-radius: 6px; cursor: pointer; font: 13px/1 Consolas, monospace; padding: 0;
+  }
+  #autocx-ai .cxai-nav button:hover:not(:disabled) { background: #F3F6FB; color: #3B7CFF; border-color: #CBD9F5; }
+  #autocx-ai .cxai-nav button:disabled { opacity: .35; cursor: default; }
+  #autocx-ai .cxai-nav-n { font: 10.5px Consolas, monospace; color: #A9B3C2; padding: 0 4px; min-width: 34px; text-align: center; }
+  #autocx-ai .cxai-follow {
+    font-size: 10.5px; padding: 1px 7px; border-radius: 999px; border: 1px dashed #C9D6F5;
+    background: #F6F9FF; color: #3B7CFF; cursor: pointer;
+  }
+  #autocx-ai .cxai-follow:hover { background: #EDF3FF; }
+  /* 提交轨迹固定在正文下方，不随题目滚动 */
+  #autocx-ai .cxai-submit-strip { flex: none; padding: 0 22px 10px; }
+  #autocx-ai .cxai-submit-strip:empty { display: none; }
+  #autocx-ai .cxai-submit-card { margin: 0; }
+  /* 键盘可达性 */
+  #autocx-ai .cxai-item:focus-visible,
+  #autocx-ai .cxai-nav button:focus-visible,
+  #autocx-ai .cxai-foot2 button:focus-visible { outline: 2px solid #3B7CFF; outline-offset: 1px; }
+  @media (prefers-reduced-motion: reduce) { #autocx-ai * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body class="mock">
+
+<div id="autocx-ai" class="open"><div class="cxai-win">
+  <header class="cxai-bar">
+    <div class="cxai-logo">CX</div>
+    <div class="cxai-titles"><h1>AI 作答记录</h1><p class="cxai-sub">做作业 · 艺术风格</p></div>
+    <div class="cxai-grow"></div>
+    <span class="cxai-pill cx-model">bailian-api/deepseek-v4.1-flash-1017</span>
+    <span class="cxai-pill cx-effort">effort medium</span>
+    <button class="cxai-icon" title="复制全部记录">⧉</button>
+    <button class="cxai-icon" title="关闭">×</button>
+  </header>
+
+  <div class="cxai-body">
+    <aside class="cxai-rail">
+      <div class="cxai-rail-head"><b>本次测验</b><span class="cxai-rail-meta">2 路并发</span></div>
+      <div class="cxai-items" id="rail"></div>
+      <div class="cxai-rail-foot">
+        <p><span>已答</span><b class="cxai-done">3 / 4</b></p>
+        <div class="cxai-meter"><i style="width:75%"></i></div>
+        <p><span class="cxai-left">提交</span><b class="cxai-fail">1 题未答</b></p>
+      </div>
+    </aside>
+
+    <main class="cxai-main">
+      <div class="cxai-session">
+        <span class="k">提取</span><span class="cxai-sm">4 题 · DOM + 字体解码</span>
+        <span class="m">14:09:51</span>
+        <span class="k">→ 开始作答</span><span class="m">14:09:51</span>
+        <span class="k">→ 并发</span><span class="cxai-sm">2 路</span>
+      </div>
+      <div class="cxai-thread" id="thread"></div>
+      <div class="cxai-submit-strip" id="submitStrip"></div>
+      <div class="cxai-note"><b>只读记录</b>不提供输入、不改答案;模型输出按纯文本转义展示。
+        <span class="cxai-note-r">AutoCX v0.13.1 · <a href="#">仓库</a></span></div>
+    </main>
+  </div>
+
+  <footer class="cxai-status">
+    <span class="cxai-submit"><b>自动提交 关</b> 开启后也只在全部题目答完时触发</span>
+    <span class="right"><span class="cxai-pill cx-key">密钥 ●●●●9f3a</span><span class="cxai-pill cx-host">bailian-api</span></span>
+  </footer>
+</div></div>
+
+<script>
+'use strict';
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const pad2 = (n) => (n < 10 ? '0' + n : '' + n);
+const TYPE = { single: '单选', multi: '多选', judge: '判断', blank: '填空' };
+
+/* ---------- 假数据：用这次真题的真实内容 ---------- */
+const QS = [
+  {
+    n: 1, type: 'single', phase: 'filled', source: 'DOM + 字体解码',
+    stem: '印象派最追求的是()。',
+    decode: { mapped: 13, total: 13, conf: 1, grade: 'A' },
+    prompt: '请回答下面这道单选题。\n题目:印象派最追求的是()。\nA、光和色\nB、光和影\nC、真实\nD、虚幻\n要求:只回复正确选项的字母(如 B),不要任何解释。',
+    params: { model: 'bailian-api/deepseek-v4.1-flash-1017', temperature: 0.1, effort: 'medium' },
+    thinking: 'We need answer Chinese multiple choice. 印象派追求光和色。Option A. Must only letter.',
+    answer: 'A',
+    result: { display: 'A', normalized: 'A', ok: true, fillOk: true, verifyOk: true },
+    usage: { completion_tokens: 24, total_tokens: 103 },
+    t: { reqAt: 1795066191000, firstThinkAt: 1795066191500, firstAnswerAt: 1795066191800, doneAt: 1795066191900 },
+  },
+  {
+    n: 2, type: 'single', phase: 'filled', source: 'DOM + 字体解码',
+    stem: '艺术风格多样性形成的原因包括()。',
+    decode: { mapped: 31, total: 31, conf: 1, grade: 'A' },
+    prompt: '请回答下面这道单选题。\n题目:艺术风格多样性形成的原因包括()。\nA、艺术家独特的创作个性\nB、艺术家独特的人生道路\nC、审美需求的多样化\nD、以上都是\n要求:只回复正确选项的字母(如 B),不要任何解释。',
+    params: { model: 'bailian-api/deepseek-v4.1-flash-1017', temperature: 0.1, effort: 'medium' },
+    thinking: 'The question asks reasons for diversity of artistic styles. A, B, C are all valid reasons; D says all of the above. Likely D all. Need only correct option letter. Final: D.',
+    answer: 'D',
+    result: { display: 'D', normalized: 'D', ok: true, fillOk: true, verifyOk: true },
+    usage: { completion_tokens: 58, total_tokens: 145 },
+    t: { reqAt: 1795066193000, firstThinkAt: 1795066193400, firstAnswerAt: 1795066193900, doneAt: 1795066194100 },
+  },
+  {
+    n: 3, type: 'multi', phase: 'filled', source: 'DOM + 字体解码',
+    stem: '大众传播媒介要通过()和()来达到大众化的目标。',
+    decode: { mapped: 19, total: 19, conf: 1, grade: 'A' },
+    prompt: '请回答下面这道多选题。\n题目:大众传播媒介要通过()和()来达到大众化的目标。\nA、时尚化\nB、小众化\nC、分众化\nD、流行化\n要求:只回复所有正确选项的字母(如 BCD),不要任何解释。',
+    params: { model: 'bailian-api/deepseek-v4.1-flash-1017', temperature: 0.1, effort: 'medium' },
+    thinking: 'Two blanks, asking which two paths reach mass audience. 流行化 and 分众化 fit: B is 小众化 (opposite). Answer BC.',
+    answer: 'BC',
+    result: { display: 'BC', normalized: 'BC', ok: true, fillOk: true, verifyOk: true },
+    usage: { completion_tokens: 41, total_tokens: 212 },
+    t: { reqAt: 1795066195000, firstThinkAt: 1795066196000, firstAnswerAt: 1795066197000, doneAt: 1795066197200 },
+  },
+  {
+    n: 4, type: 'judge', phase: 'queued', source: 'DOM + 字体解码',
+    stem: '艺术风格主要指向的艺术家个体,而艺术流派则主要指向一群艺术家。',
+    decode: { mapped: 29, total: 29, conf: 1, grade: 'A' },
+    prompt: '', params: null, thinking: '', answer: '', result: null, usage: null, t: {},
+  },
+];
+
+/* ---------- 视图状态：本次改动的核心 ---------- */
+const state = {
+  sel: 1,            // 当前查看的题号
+  follow: true,      // 是否跟随"正在跑的那道题"
+  openReq: new Set([1]),   // 哪些题的请求块是展开的（按题号记住）
+  openThink: new Set(),    // 哪些题的思考块被手动折起（负数语义简化成 Set）
+};
+
+function liveOf(c) { return c.phase === 'requesting' || c.phase === 'thinking' || c.phase === 'answering'; }
+function activeQ() {
+  const live = QS.find(liveOf);
+  if (live) return live.n;
+  // 没有在跑的，就停在"最后一道已答完的"
+  const done = QS.filter((q) => q.phase === 'filled');
+  return done.length ? done[done.length - 1].n : 1;
+}
+function phaseText(c) {
+  switch (c.phase) {
+    case 'queued': return '排队中';
+    case 'requesting': return '请求中';
+    case 'thinking': return '思考中';
+    case 'answering': return '回答中';
+    case 'filled': return c.result && c.result.display ? '已完成 · ' + c.result.display + ' · 已勾选' : '已完成';
+    case 'failed': return '失败';
+    default: return c.phase || '';
+  }
+}
+function dotOf(c) {
+  if (c.phase === 'failed') return 'bad';
+  if (c.phase === 'filled') return 'ok';
+  if (liveOf(c)) return 'live';
+  return '';
+}
+
+/* ---------- 侧栏 ---------- */
+function renderRail() {
+  document.getElementById('rail').innerHTML = QS.map((c) => {
+    const on = c.n === state.sel ? ' on' : '';
+    return '<div class="cxai-item' + on + '" data-n="' + c.n + '" tabindex="0" role="button">'
+      + '<div class="n">' + pad2(c.n) + '</div>'
+      + '<div class="tx"><div class="q">' + esc(c.stem) + '</div>'
+      + '<div class="st"><i class="cxai-dot ' + dotOf(c) + '"></i>' + esc(phaseText(c)) + '</div></div></div>';
+  }).join('');
+}
+
+/* ---------- 单题正文（沿用原 turn 的结构） ---------- */
+function turnHTML(c) {
+  const n = c.n;
+  const live = liveOf(c);
+  const head = '<div class="cxai-turn-head">'
+    + '<span class="cxai-idx">' + pad2(n) + '</span>'
+    + '<span class="cxai-q">' + esc(c.stem) + '</span>'
+    + '<span class="cxai-chip">' + esc(TYPE[c.type] || '') + '</span>'
+    + (c.decode ? '<span class="cxai-chip" title="字体解码:命中/密文字，以及该题定级">'
+      + '解码 ' + c.decode.mapped + '/' + c.decode.total + ' · ' + Math.round(c.decode.conf * 100) + '% · ' + esc(c.decode.grade) + '</span>' : '')
+    + '<span class="cxai-nav">'
+    + '<button data-nav="prev"' + (n === 1 ? ' disabled' : '') + ' title="上一题 (←)">‹</button>'
+    + '<span class="cxai-nav-n">' + n + ' / ' + QS.length + '</span>'
+    + '<button data-nav="next"' + (n === QS.length ? ' disabled' : '') + ' title="下一题 (→)">›</button>'
+    + '</span></div>';
+
+  if (c.phase === 'queued') {
+    return '<section class="cxai-turn">' + head
+      + '<div class="cxai-receipt" style="cursor:default"><span class="cxai-dot"></span>'
+      + '<span class="q">排队中 —— 并发已占满,前面的题结束后自动开始</span></div></section>';
+  }
+
+  let body = '';
+  // 请求块
+  const p = c.params || {};
+  const open = state.openReq.has(n);
+  body += '<div class="cxai-req' + (open ? ' open' : '') + '">'
+    + '<div class="cxai-req-row"><span class="who">脚本</span><span class="arrow">→</span>'
+    + '<span class="who">' + esc(p.model || 'model') + '</span>'
+    + '<span class="cxai-m">14:09:51</span>'
+    + '<span class="cxai-m">prompt ' + String(c.prompt || '').length + ' 字</span>'
+    + '<span class="cxai-caret-r" style="margin-left:auto">›</span></div>'
+    + '<div class="cxai-req-body"><pre>' + esc(c.prompt || '(未记录 prompt)') + '</pre>'
+    + '<div class="cxai-tags">'
+    + '<span class="cxai-chip">temperature ' + p.temperature + '</span>'
+    + '<span class="cxai-chip">stream: true</span>'
+    + '<span class="cxai-chip">reasoning_effort: ' + esc(p.effort || '') + '</span>'
+    + '<span class="cxai-chip">来源 ' + esc(c.source || '') + '</span>'
+    + '</div></div></div>';
+
+  // 思考块
+  if (c.thinking) {
+    const folded = state.openThink.has(n);
+    body += '<div class="cxai-think' + (folded ? ' collapsed' : '') + '" data-think="' + n + '">'
+      + '<div class="cxai-think-head"><span class="lbl">思考过程</span>'
+      + '<span class="time">0.4s</span><span class="cxai-caret-r" style="margin-left:auto">›</span></div>'
+      + '<p class="cxai-think-body">' + esc(c.thinking) + '</p></div>';
+  } else if (c.phase === 'requesting' || c.phase === 'thinking') {
+    body += '<div class="cxai-think"><div class="cxai-think-head"><span class="lbl">思考中</span>'
+      + '<span class="time">1.2s</span></div>'
+      + '<p class="cxai-think-body">等待模型吐出第一个思考片段…</p></div>';
+  }
+
+  // 回答块
+  const res = c.result || {};
+  body += '<div class="cxai-ans"><div class="cxai-ans-head"><span class="lbl">回答</span>'
+    + '<span class="time">0.3s</span></div>'
+    + '<p class="cxai-ans-body">' + esc(c.answer || '等待回答…') + '</p>'
+    + (res.display
+      ? '<div class="cxai-verdict">'
+      + '<span class="cxai-key ' + (res.ok === false ? 'bad' : 'ok') + '">' + esc(res.display) + '</span>'
+      + '<span class="cxai-sep"></span><span>解析 → ' + esc(res.normalized) + '</span>'
+      + (res.fillOk ? '<span class="cxai-sep"></span><span class="cxai-okn">✓ 已在页面上勾选</span>' : '')
+      + (res.verifyOk === true ? '<span class="cxai-sep"></span><span class="cxai-okn">✓ 回读校验一致</span>' : '')
+      + '</div>' : '')
+    + '</div>';
+
+  const u = c.usage || {};
+  const foot = '<div class="cxai-foot2">'
+    + '<span class="cxai-m">回答 ' + (u.completion_tokens || 0) + ' tok · 共 ' + (u.total_tokens || 0) + ' tok · 1.1s</span>'
+    + '<span class="acts"><button>复制本题</button></span></div>';
+
+  return '<section class="cxai-turn">' + head + body + foot + '</section>';
+}
+
+/* 提交轨迹：全局事件，固定在正文下方，不跟题目一起滚 */
+const SUBMIT_EVENTS = [
+  { ts: '14:10:07', text: '4/4 已答。自动提交已关闭,请人工核对后提交' },
+];
+
+function renderSubmitStrip() {
+  const el = document.getElementById('submitStrip');
+  if (!SUBMIT_EVENTS.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="cxai-submit-card"><div><b>提交轨迹</b><ul>'
+    + SUBMIT_EVENTS.map((e) => '<li>' + esc(e.ts) + ' · ' + esc(e.text) + '</li>').join('')
+    + '</ul></div></div>';
+}
+
+/* ---------- 渲染 ---------- */
+function render() {
+  renderRail();
+  renderSubmitStrip();
+  const c = QS.find((q) => q.n === state.sel) || QS[0];
+  const nav = document.getElementById('thread');
+  nav.innerHTML = turnHTML(c);
+  nav.scrollTop = 0;
+
+  // 用户手动离开当前题时，给一个"回到当前题"的入口
+  const act = activeQ();
+  if (!state.follow && act !== state.sel) {
+    const head = nav.querySelector('.cxai-turn-head');
+    const btn = document.createElement('button');
+    btn.className = 'cxai-follow';
+    btn.textContent = '回到当前题 ' + pad2(act);
+    btn.onclick = () => { state.follow = true; state.sel = act; render(); };
+    head.appendChild(btn);
+  }
+}
+
+/* ---------- 交互 ---------- */
+document.getElementById('rail').addEventListener('click', (e) => {
+  const it = e.target.closest('.cxai-item');
+  if (!it) return;
+  select(+it.dataset.n);
+});
+document.getElementById('rail').addEventListener('keydown', (e) => {
+  const it = e.target.closest('.cxai-item');
+  if (!it) return;
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(+it.dataset.n); }
+});
+document.getElementById('thread').addEventListener('click', (e) => {
+  const nav = e.target.closest('[data-nav]');
+  if (nav) {
+    select(state.sel + (nav.dataset.nav === 'next' ? 1 : -1));
+    return;
+  }
+  if (e.target.closest('.cxai-req-row')) {
+    if (state.openReq.has(state.sel)) state.openReq.delete(state.sel); else state.openReq.add(state.sel);
+    render();
+    return;
+  }
+  const th = e.target.closest('[data-think]');
+  if (th) {
+    const n = +th.dataset.think;
+    if (state.openThink.has(n)) state.openThink.delete(n); else state.openThink.add(n);
+    render();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { select(state.sel - 1); }
+  if (e.key === 'ArrowRight') { select(state.sel + 1); }
+});
+
+function select(n) {
+  const next = Math.min(QS.length, Math.max(1, n));
+  if (next === state.sel) return;
+  state.sel = next;
+  // 手动点某一题 → 停止自动跟随
+  state.follow = false;
+  render();
+}
+
+/* 模拟"运行中自动跟随"：打开页面 12 秒后，第 4 题开始跑，视图自动切过去 */
+setTimeout(() => {
+  QS[3].phase = 'requesting';
+  QS[3].prompt = '请回答下面这道判断题。\n题目:艺术风格主要指向的艺术家个体,而艺术流派则主要指向一群艺术家。\n要求:只回复正确选项的字母(如 B),不要任何解释。';
+  QS[3].params = { model: 'bailian-api/deepseek-v4.1-flash-1017', temperature: 0.1, effort: 'medium' };
+  if (state.follow) state.sel = 4;
+  render();
+}, 12000);
+
+render();
+</script>
+</body>
+</html>
