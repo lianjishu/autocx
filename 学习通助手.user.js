@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.11.0
+// @version      0.11.1
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -1791,6 +1791,8 @@
           let clicked = false;
           for (let i = idx + 1; i < $items.length; i++) {
             const $it = $items.eq(i);
+            // 跳过分节标题(firstLayer:如"4 造型艺术"这类章标题,没有任务点)
+            if ($it.hasClass('firstLayer') || $it.find('.posCatalog_name').length === 0) continue;
             if (!$it.find('.icon_Completed').length) {
               const nameEl = $it.find('.posCatalog_name').get(0) || $it.get(0);
               nameEl.click();
