@@ -32,8 +32,20 @@
 ```js
 // @require https://cdn.jsdelivr.net/npm/vue@3.5.22/dist/vue.global.prod.js
 // @require https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js
+// 以下 7 个 dayjs 插件为 AntD UMD 的运行期依赖
+// @require https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/advancedFormat.js
+// @require https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/customParseFormat.js
+// @require https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/localeData.js
+// @require https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/quarterOfYear.js
+// @require https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/weekOfYear.js
+// @require https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/weekYear.js
+// @require https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/weekday.js
+// ScriptCat 的 @require 作用域不保证 UMD 的 window 绑定，补一行 shim：
+// @require data:application/javascript,window.Vue%3DVue%3Bwindow.dayjs%3Ddayjs%3B
 // @require https://cdn.jsdelivr.net/npm/ant-design-vue@4.2.6/dist/antd.min.js
 ```
+
+- `Vue` / `antd` 取 `window.Vue` / `window.antd`（取不到再回退到脚本作用域的同名变量）；Vue 运行时编译器通过 `new Function` 执行模板，挂载前把 Vue 3 实例补到 `unsafeWindow.Vue`（仅当页面没有 Vue 时），否则会报 `Vue is not defined`。
 
 - 顺序必须是 Vue → dayjs → Ant Design Vue；AntD UMD 依赖 `Vue` 与 `dayjs` 全局。
 - 不引入 Pinia：面板状态规模小，`reactive` / `ref` 足够。

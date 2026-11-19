@@ -1,10 +1,10 @@
 # AutoCX 学习通自动看课+LLM答题助手
 
-轻量级 ScriptCat 脚本：学习通自动看课（视频/文档课件）+ 自行接入大模型 API 辅助章节测验答题（不接题库）+「AI 作答记录」窗口。
+ScriptCat 脚本：学习通自动看课（视频/文档课件）+ 自行接入大模型 API 辅助章节测验答题（不接题库）+「AI 作答记录」窗口。
 
 [GitHub](https://github.com/lianjishu/autocx) · [Gitee](https://gitee.com/yake2024/autocx) · [反馈](https://github.com/lianjishu/autocx/issues)
 
-设计文档：[docs/superpowers/specs/2026-11-18-chaoxing-auto-course-design.md](docs/superpowers/specs/2026-11-18-chaoxing-auto-course-design.md)
+设计文档：[Vue 前端重写设计](docs/superpowers/specs/2026-11-19-autocx-vue-ui-rewrite-design.md) · [自动看课设计](docs/superpowers/specs/2026-11-18-chaoxing-auto-course-design.md)
 
 ## 功能
 
@@ -17,14 +17,14 @@
 | 作业（work） | 与章节测验同一条链路，独立开关 `作业自动提交`（默认关，作业常只能交一次）；已批阅/已提交/已截止的页面一律不动手，草稿态只补空白题、不覆盖已有作答 |
 | **AI 作答记录** | 独立只读窗口：脚本发出的**请求**（prompt + temperature/stream/effort + 来源）、模型的**思考**（流式逐字）、模型的**回答**（流式逐字）、**解析 → 勾选 → 回读校验**结果、以及**提交轨迹**（点击提交 / 确认弹窗 / 验证码转人工 / 结果）。模型不返回思考内容时如实标注，绝不编造 |
 | 自动推进 | 当前章节完成后自动切换目录中下一个未完成章节 |
-| 悬浮面板 | 毛玻璃浅色面板：双助手渐变卡片（看课/答题独立开关+实时状态）/ 模块徽章状态流 / 跨帧日志 / AI 摘要页签 / 设置（底部有版本与仓库入口）；收起为**可拖迷你球**（外圈视频进度环 + 助手状态点 + 悬停快捷菜单） |
+| 悬浮面板 | 批注纸风格：纸白网格面板 + 红笔页边 + 双助手账本状态 / 模块徽章状态流 / 跨帧日志 / AI 摘要页签 / 设置（底部有版本与仓库入口）；收起为**右缘书签**（红色进度压条 + 悬停快捷菜单） |
 
 ## 安装
 
 1. 浏览器安装 [ScriptCat](https://scriptcat.org/) 扩展
 2. 把 `学习通助手.user.js` 拖入 ScriptCat 管理面板（或新建脚本粘贴内容）
-3. 打开学习通课程学习页（`mooc1.chaoxing.com/mycourse/studentstudy?...`），右下角出现蓝色 **CX** 悬浮球即生效
-4. 想看答题过程：点面板 **AI** 页签 → 「打开作答记录窗口」（也可从迷你球悬停菜单「答题记录」进入，或 ScriptCat 菜单里的「打开 AI 作答记录」）
+3. 打开学习通课程学习页（`mooc1.chaoxing.com/mycourse/studentstudy?...`），右侧出现 **AutoCX 书签**即生效，点书签展开面板
+4. 想看答题过程：点面板 **AI** 页签 → 「打开作答记录窗口」（也可从书签悬停菜单「答题记录」进入，或 ScriptCat 菜单里的「打开 AI 作答记录」）
 
 ## 配置（面板 → 设置）
 
@@ -79,9 +79,7 @@
 
 ## 技术栈
 
-jQuery 3.7（DOM）+ ElementGetter 2.1（cxxjackie，异步元素监听）+ Ajax-hook（wendux，XHR 劫持备用）+ ScriptCat GM API。单文件零构建，**不引入 markdown 渲染库**：模型输出一律转义成纯文本展示（pre-wrap），避免 prompt injection 变成 DOM 注入。
-
-jQuery 3.7（DOM）+ ElementGetter 2.1（cxxjackie，异步元素监听）+ Ajax-hook（wendux，XHR 劫持备用）+ ScriptCat GM API。单文件零构建，**不引入 markdown 渲染库**：模型输出一律转义成纯文本展示（pre-wrap），避免 prompt injection 变成 DOM 注入。
+Vue 3.5（`vue.global.prod.js`，组件化 UI）+ Ant Design Vue 4.2（表单控件与主题 token）+ dayjs + ElementGetter 2.1（cxxjackie，异步元素监听）+ Ajax-hook（wendux，XHR 劫持备用）+ ScriptCat GM API。单文件零构建，**不引入 markdown 渲染库**：模型输出一律转义成纯文本展示（pre-wrap），避免 prompt injection 变成 DOM 注入。
 
 跨帧数据流：答题在测验 iframe 里发生，窗口在顶层帧渲染；两者通过 GM 存储（`autocx.ai.*` 键）通信，流式文本按 300ms 节流写入，相位变化立即写。
 

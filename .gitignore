@@ -1,5 +1,7 @@
 ABC学习通网课助手/
 docs/
+.superpowers/
+.tmp/
 test/fontdec/fixture.js
 test/fontdec/captured/
 test/fontdec/fixture-art.js

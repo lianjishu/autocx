@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      0.14.0
-// @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。轻量单文件,基于 jQuery + ElementGetter + Ajax-hook。
+// @version      1.0.0
+// @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
 // @homepage     https://github.com/lianjishu/autocx
@@ -12,6 +12,17 @@
 // @require      https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js
 // @require      https://cdn.jsdelivr.net/gh/wendux/Ajax-hook@master/dist/ajaxhook.min.js
 // @require      https://scriptcat.org/lib/513/2.1.0/ElementGetter.js
+// @require      https://cdn.jsdelivr.net/npm/vue@3.5.22/dist/vue.global.prod.js
+// @require      https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js
+// @require      https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/advancedFormat.js
+// @require      https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/customParseFormat.js
+// @require      https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/localeData.js
+// @require      https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/quarterOfYear.js
+// @require      https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/weekOfYear.js
+// @require      https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/weekYear.js
+// @require      https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/weekday.js
+// @require      data:application/javascript,window.Vue%3DVue%3Bwindow.dayjs%3Ddayjs%3B
+// @require      https://cdn.jsdelivr.net/npm/ant-design-vue@4.2.6/dist/antd.min.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -729,10 +740,10 @@
     });
   }
 
-  /* ============================== AI 作答记录窗口 =========================== */
+/* ============================== AI 作答记录窗口(Vue) =========================== */
   // 只读窗口:脚本请求 → 模型思考 → 模型回答 → 解析/勾选/校验 → 提交轨迹。
   // 顶层帧挂载;若某帧自己就是顶层(单独打开答卷页),也在本帧挂载。
-  // 模型输出是不可信数据:一律 esc() 转义后写入 DOM,绝不拼原始 HTML。
+  // 模型输出是不可信数据:Vue 模板默认转义文本,不使用 v-html。
   const AIW = {
     api: null,
     ensure() {
@@ -741,167 +752,268 @@
     },
   };
 
-  function createAIWindow() {
-    GM_addStyle(`
-      #autocx-ai{position:fixed;inset:0;z-index:2147483647;pointer-events:none}
-      #autocx-ai .cxai-win{position:fixed;display:none;flex-direction:column;
-        width:900px;height:640px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);
-        background:#fff;border-radius:14px;overflow:hidden;pointer-events:auto;
-        border:1px solid rgba(229,231,235,.9);
-        box-shadow:0 2px 4px rgba(17,24,39,.05),0 22px 60px rgba(17,24,39,.22);
-        font:13px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:#111827}
-      #autocx-ai.open .cxai-win{display:flex}
-      /* 头部 */
-      #autocx-ai .cxai-bar{flex:none;height:52px;display:flex;align-items:center;gap:10px;padding:0 12px 0 14px;
-        border-bottom:1px solid #E8ECF3;background:linear-gradient(180deg,#fff,#FCFDFF);cursor:grab;user-select:none}
-      #autocx-ai .cxai-bar:active{cursor:grabbing}
-      #autocx-ai .cxai-logo{width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;
-        color:#fff;font-weight:700;font-size:11.5px;letter-spacing:.4px;
-        background:linear-gradient(140deg,#3B7CFF,#6FA8FF);box-shadow:0 3px 10px rgba(59,124,255,.32)}
-      #autocx-ai .cxai-titles{min-width:0}
-      #autocx-ai .cxai-titles h1{font-size:13.5px;font-weight:650;letter-spacing:.1px;margin:0}
-      #autocx-ai .cxai-titles p{font-size:11px;color:#98A1B0;margin:1px 0 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px}
-      #autocx-ai .cxai-grow{flex:1}
-      #autocx-ai .cxai-pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid #E8ECF3;
-        color:#4B5563;background:#FBFCFE;white-space:nowrap;font-family:Consolas,monospace}
-      #autocx-ai .cxai-pill:empty{display:none}
-      #autocx-ai .cx-model{max-width:230px;overflow:hidden;text-overflow:ellipsis}
-      #autocx-ai .cxai-icon{width:26px;height:26px;border-radius:7px;border:1px solid transparent;background:none;
-        color:#8A94A6;cursor:pointer;font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center}
-      #autocx-ai .cxai-icon:hover{background:#F2F5FA;border-color:#E8ECF3;color:#4B5563}
-      /* 主体 */
-      #autocx-ai .cxai-body{flex:1;display:flex;min-height:0}
-      #autocx-ai .cxai-rail{width:224px;flex:none;background:#F7F9FC;border-right:1px solid #E8ECF3;
-        display:flex;flex-direction:column;min-height:0}
-      #autocx-ai .cxai-rail-head{padding:12px 14px 8px;display:flex;align-items:center;justify-content:space-between}
-      #autocx-ai .cxai-rail-head b{font-size:11.5px;color:#4B5563;font-weight:600}
-      #autocx-ai .cxai-rail-head span{font-size:11px;color:#98A1B0}
-      #autocx-ai .cxai-items{flex:1;overflow:auto;padding:2px 8px 8px}
-      #autocx-ai .cxai-item{display:flex;gap:9px;padding:9px 10px;border-radius:10px;cursor:pointer}
-      #autocx-ai .cxai-item+.cxai-item{margin-top:2px}
-      #autocx-ai .cxai-item:hover{background:#EFF3FA}
-      #autocx-ai .cxai-item.on{background:#fff;box-shadow:0 1px 2px rgba(17,24,39,.05),0 0 0 1px #E6ECF6}
-      #autocx-ai .cxai-item .n{font:10.5px Consolas,monospace;color:#9AA5B6;width:16px;flex:none;padding-top:2px}
-      #autocx-ai .cxai-item.on .n{color:#3B7CFF}
-      #autocx-ai .cxai-item .tx{min-width:0;flex:1}
-      #autocx-ai .cxai-item .q{font-size:12px;color:#374151;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-      #autocx-ai .cxai-item .st{display:flex;align-items:center;gap:5px;margin-top:3px;font-size:10.5px;color:#98A1B0}
-      #autocx-ai .cxai-dot{width:6px;height:6px;border-radius:50%;background:#CBD3DF;flex:none}
-      #autocx-ai .cxai-dot.ok{background:#22C55E}
-      #autocx-ai .cxai-dot.live{background:#7C5CE0;animation:cxai-pulse 1.4s infinite}
-      #autocx-ai .cxai-dot.bad{background:#EF4444}
-      @keyframes cxai-pulse{0%,100%{box-shadow:0 0 0 0 rgba(124,92,224,.45)}50%{box-shadow:0 0 0 4px rgba(124,92,224,0)}}
-      #autocx-ai .cxai-rail-foot{flex:none;border-top:1px solid #E8ECF3;padding:10px 14px 12px;background:#FBFCFE}
-      #autocx-ai .cxai-rail-foot p{font-size:10.5px;color:#98A1B0;display:flex;justify-content:space-between;margin:0}
-      #autocx-ai .cxai-rail-foot p b{color:#4B5563;font-weight:600}
-      #autocx-ai .cxai-meter{height:4px;border-radius:2px;background:#E7ECF4;overflow:hidden;margin:7px 0 6px}
-      #autocx-ai .cxai-meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,#3B7CFF,#7FA9FF);transition:width .3s}
-      /* 主线程 */
-      #autocx-ai .cxai-main{flex:1;display:flex;flex-direction:column;min-width:0;background:#fff}
-      #autocx-ai .cxai-session{flex:none;display:flex;align-items:center;gap:7px;flex-wrap:wrap;
-        padding:11px 22px 10px;font-size:11px;color:#94A0B2;border-bottom:1px solid #F1F4F9}
-      #autocx-ai .cxai-session:empty{display:none}
-      #autocx-ai .cxai-session .k{color:#5B6678}
-      #autocx-ai .cxai-session .m{font-family:Consolas,monospace;font-size:10.5px;color:#AAB3C0}
-      #autocx-ai .cxai-sm{font-size:10.5px;padding:1px 7px;border-radius:5px;background:#F1F4F9;color:#64748B}
-      #autocx-ai .cxai-thread{flex:1;overflow:auto;padding:16px 22px 6px}
-      #autocx-ai .cxai-empty{color:#A9B3C2;font-size:12.5px;line-height:1.9;padding:8px 0}
-      #autocx-ai .cxai-turn{padding-bottom:16px}
-      #autocx-ai .cxai-turn+.cxai-turn{border-top:1px dashed #F1F4F9;padding-top:16px}
-      #autocx-ai .cxai-turn-head{display:flex;align-items:center;gap:8px;margin-bottom:11px}
-      #autocx-ai .cxai-idx{font:11px Consolas,monospace;color:#fff;background:#3B7CFF;border-radius:5px;padding:1px 6px}
-      #autocx-ai .cxai-q{font-size:12.5px;color:#374151;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-      #autocx-ai .cxai-chip{font-size:10.5px;padding:1px 7px;border-radius:5px;background:#F1F4F9;color:#64748B;white-space:nowrap}
-      #autocx-ai .cxai-chip.v{background:#F6F3FF;color:#6D49D6}
-      /* 已完成轮次:一行回执 */
-      #autocx-ai .cxai-receipt{display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid #E8ECF3;
-        border-radius:10px;background:#FCFDFF;cursor:pointer}
-      #autocx-ai .cxai-receipt:hover{background:#F7F9FD;border-color:#DDE5F1}
-      #autocx-ai .cxai-receipt .cxai-idx{background:#94A3B8}
-      #autocx-ai .cxai-receipt .q{font-size:12px;color:#4B5563;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-      #autocx-ai .cxai-key{font:600 12px Consolas,monospace;color:#fff;background:#111827;border-radius:5px;padding:1px 8px;letter-spacing:1px}
-      #autocx-ai .cxai-key.ok{background:#15803D}
-      #autocx-ai .cxai-key.bad{background:#B91C1C}
-      #autocx-ai .cxai-okn{font-size:11px;color:#15803D;white-space:nowrap}
-      #autocx-ai .cxai-badn{font-size:11px;color:#B91C1C;white-space:nowrap}
-      #autocx-ai .cxai-m{font-family:Consolas,monospace;font-size:10.5px;color:#AAB3C0;white-space:nowrap}
-      #autocx-ai .cxai-caret-r{color:#A9B3C2;font-size:10px;transform:rotate(90deg);display:inline-block}
-      /* 请求块 */
-      #autocx-ai .cxai-req{border:1px solid #E8ECF3;border-radius:10px;background:#FCFDFF;overflow:hidden;margin-bottom:10px}
-      #autocx-ai .cxai-req-row{display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:11.5px;color:#5B6678;cursor:pointer}
-      #autocx-ai .cxai-req-row .who{color:#334155}
-      #autocx-ai .cxai-req-row .arrow{color:#3B7CFF;font-weight:600}
-      #autocx-ai .cxai-req-body{border-top:1px solid #F1F4F9;padding:10px 12px;background:#fff;display:none}
-      #autocx-ai .cxai-req.open .cxai-req-body{display:block}
-      #autocx-ai .cxai-req-body pre{font:11px/1.6 Consolas,monospace;color:#4B5563;white-space:pre-wrap;word-break:break-word;margin:0}
-      #autocx-ai .cxai-tags{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-      /* 思考块 */
-      #autocx-ai .cxai-think{border-left:2px solid #D9CCFA;background:linear-gradient(180deg,#FAF8FF,#FEFDFF);
-        border-radius:0 10px 10px 0;padding:9px 12px 10px;margin-bottom:10px}
-      #autocx-ai .cxai-think-head{display:flex;align-items:center;gap:7px;font-size:11.5px;color:#6D49D6;margin-bottom:5px}
-      #autocx-ai .cxai-think-head .lbl{font-weight:600}
-      #autocx-ai .cxai-think-head .time{font-family:Consolas,monospace;font-size:10.5px;color:#A78BFA}
-      #autocx-ai .cxai-think-body{font-size:12px;line-height:1.7;color:#5B5470;white-space:pre-wrap;word-break:break-word;margin:0}
-      #autocx-ai .cxai-think.collapsed .cxai-think-body{display:none}
-      #autocx-ai .cxai-think-head{cursor:pointer}
-      #autocx-ai .cxai-cursor{display:inline-block;width:6px;height:13px;background:#8B5CF6;vertical-align:-2px;margin-left:2px;
-        border-radius:1px;animation:cxai-blink 1s steps(2) infinite}
-      @keyframes cxai-blink{50%{opacity:0}}
-      @media (prefers-reduced-motion:reduce){#autocx-ai .cxai-cursor,#autocx-ai .cxai-dot.live{animation:none}}
-      /* 回答块 */
-      #autocx-ai .cxai-ans{border:1px solid #E8ECF3;border-radius:10px;padding:10px 12px 11px;background:#fff}
-      #autocx-ai .cxai-ans-head{display:flex;align-items:center;gap:7px;font-size:11.5px;color:#64748B;margin-bottom:6px}
-      #autocx-ai .cxai-ans-head .lbl{font-weight:600;color:#334155}
-      #autocx-ai .cxai-ans-head .time{font-family:Consolas,monospace;font-size:10.5px;color:#AAB3C0}
-      #autocx-ai .cxai-ans-body{font-size:13px;line-height:1.75;color:#1F2937;white-space:pre-wrap;word-break:break-word;margin:0}
-      #autocx-ai .cxai-ans-body.pending{color:#A9B3C2;font-size:12.5px}
-      #autocx-ai .cxai-verdict{display:flex;align-items:center;gap:7px;margin-top:9px;padding-top:9px;
-        border-top:1px dashed #F1F4F9;flex-wrap:wrap;font-size:11.5px;color:#64748B}
-      #autocx-ai .cxai-sep{width:1px;height:12px;background:#E8ECF3}
-      #autocx-ai .cxai-foot2{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:10.5px;color:#A9B3C2}
-      #autocx-ai .cxai-foot2 .acts{margin-left:auto;display:flex;gap:4px}
-      #autocx-ai .cxai-foot2 button{font:11px inherit;color:#7C8798;background:none;border:1px solid transparent;
-        border-radius:6px;padding:2px 7px;cursor:pointer}
-      #autocx-ai .cxai-foot2 button:hover{background:#F3F6FA;border-color:#E8ECF3;color:#475569}
-      /* 错误 / 提交事件 */
-      #autocx-ai .cxai-err{border:1px solid #FCE4E4;background:#FEF7F7;border-radius:10px;padding:10px 12px;
-        font-size:12px;color:#B91C1C;line-height:1.7}
-      #autocx-ai .cxai-err b{color:#991B1B}
-      #autocx-ai .cxai-submit-card{display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:10px;
-        background:linear-gradient(180deg,#FFFCF5,#FEF8EC);border:1px solid #F2E6CC;font-size:11.5px;color:#8A6A2F}
-      #autocx-ai .cxai-submit-card b{color:#B45309}
-      #autocx-ai .cxai-submit-card ul{margin:4px 0 0;padding-left:16px}
-      /* 底部 */
-      #autocx-ai .cxai-note{flex:none;display:flex;align-items:center;gap:6px;border-top:1px solid #E8ECF3;
-        padding:9px 20px;background:#FCFDFF;font-size:10.5px;color:#A9B3C2}
-      #autocx-ai .cxai-note b{color:#7C8798;font-weight:600;letter-spacing:.2px;margin-right:2px}
-      #autocx-ai .cxai-note-r{margin-left:auto;color:#B6BFCC;white-space:nowrap}
-      #autocx-ai .cxai-note-r a{color:#8A94A6;text-decoration:none}
-      #autocx-ai .cxai-note-r a:hover{color:#3B7CFF;text-decoration:underline}
-      #autocx-ai .cxai-status{flex:none;display:flex;align-items:center;gap:9px;padding:9px 16px;
-        border-top:1px solid #F2E6CC;background:linear-gradient(180deg,#FFFCF5,#FEF8EC);font-size:11px;color:#8A6A2F}
-      #autocx-ai .cxai-status b{color:#B45309;font-weight:600}
-      #autocx-ai .cxai-status .right{margin-left:auto;display:flex;align-items:center;gap:8px;color:#8B9099}
-      #autocx-ai .cxai-status .right .cxai-sm{background:#EAF1FF;color:#2E6BD6}
-      /* ---- 单题视图(主从布局):左边选一题,右边只画这一题 ---- */
-      #autocx-ai .cxai-thread{padding-bottom:0}
-      #autocx-ai .cxai-nav{display:flex;align-items:center;gap:2px;flex:none}
-      #autocx-ai .cxai-nav button{width:22px;height:22px;border:1px solid #E8ECF3;background:#fff;color:#6B7688;
-        border-radius:6px;cursor:pointer;font:13px/1 Consolas,monospace;padding:0}
-      #autocx-ai .cxai-nav button:hover:not(:disabled){background:#F3F6FB;color:#3B7CFF;border-color:#CBD9F5}
-      #autocx-ai .cxai-nav button:disabled{opacity:.35;cursor:default}
-      #autocx-ai .cxai-nav-n{font:10.5px Consolas,monospace;color:#A9B3C2;padding:0 4px;min-width:34px;text-align:center}
-      #autocx-ai .cxai-follow{font-size:10.5px;padding:1px 7px;border-radius:999px;border:1px dashed #C9D6F5;
-        background:#F6F9FF;color:#3B7CFF;cursor:pointer;white-space:nowrap}
-      #autocx-ai .cxai-follow:hover{background:#EDF3FF}
-      #autocx-ai .cxai-submit-strip{flex:none;padding:0 22px 10px}
-      #autocx-ai .cxai-submit-strip:empty{display:none}
-      #autocx-ai .cxai-submit-strip .cxai-submit-card{margin:0}
-      #autocx-ai .cxai-item:focus-visible,#autocx-ai .cxai-nav button:focus-visible,
-      #autocx-ai .cxai-foot2 button:focus-visible,#autocx-ai .cxai-follow:focus-visible{outline:2px solid #3B7CFF;outline-offset:1px}
-    `);
+  const AI_CSS = `
+    #autocx-ai-vue-root{position:fixed;inset:0;z-index:2147483647;pointer-events:none;
+      font:13px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:#1E2A2F}
+    #autocx-ai-vue-root *{box-sizing:border-box}
+    #autocx-ai-vue-root .acx-ai{position:absolute;inset:0;background:rgba(24,32,34,.38);display:flex;align-items:center;justify-content:center;padding:24px;pointer-events:auto}
+    #autocx-ai-vue-root .acx-ai-win{position:fixed;width:980px;max-width:calc(100vw - 48px);height:640px;max-height:calc(100vh - 48px);
+      background:#FAFAF5;border:1px solid rgba(30,42,47,.3);box-shadow:0 30px 70px rgba(20,28,30,.4);display:flex;flex-direction:column}
+    #autocx-ai-vue-root .acx-ai-top{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:2px solid #1E2A2F;cursor:grab;user-select:none}
+    #autocx-ai-vue-root .acx-ai-top:active{cursor:grabbing}
+    #autocx-ai-vue-root .acx-ai-seal{width:34px;height:34px;background:#C2453A;color:#FFF9F0;display:flex;align-items:center;justify-content:center;
+      font:700 12px/1 Georgia,"Songti SC",serif;transform:rotate(-2deg);box-shadow:inset 0 0 0 2px rgba(255,255,255,.22);flex:none}
+    #autocx-ai-vue-root .acx-ai-title{line-height:1.1}
+    #autocx-ai-vue-root .acx-ai-title b{display:block;font:600 19px/1.1 Georgia,"Songti SC",serif}
+    #autocx-ai-vue-root .acx-ai-title span{display:block;font-size:10px;color:#7C8688;margin-top:3px;letter-spacing:.1em;max-width:460px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #autocx-ai-vue-root .acx-ai-meta{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:10px;color:#7C8688}
+    #autocx-ai-vue-root .acx-ai-meta .pill{border:1px solid rgba(30,42,47,.18);padding:3px 7px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+    #autocx-ai-vue-root .acx-ai-close{border:0;background:transparent;font-size:22px;line-height:1;color:#7C8688;cursor:pointer;padding:0 2px}
+    #autocx-ai-vue-root .acx-ai-close:hover{color:#C2453A}
+    #autocx-ai-vue-root .acx-ai-copy{border:0;background:transparent;font-size:14px;line-height:1;color:#7C8688;cursor:pointer;padding:0 4px}
+    #autocx-ai-vue-root .acx-ai-main{flex:1;display:flex;min-height:0}
+    #autocx-ai-vue-root .acx-ai-rail{width:260px;flex:none;background:#F1F2EA;border-right:1px solid rgba(30,42,47,.14);display:flex;flex-direction:column;min-height:0}
+    #autocx-ai-vue-root .acx-ai-rail-head{padding:12px 14px 10px;border-bottom:1px solid rgba(30,42,47,.12);display:flex;align-items:baseline;gap:6px}
+    #autocx-ai-vue-root .acx-ai-rail-head b{font:600 12px Georgia,"Songti SC",serif}
+    #autocx-ai-vue-root .acx-ai-rail-head span{margin-left:auto;font-size:9.5px;color:#8B9495}
+    #autocx-ai-vue-root .acx-ai-items{flex:1;overflow:auto;scrollbar-width:thin}
+    #autocx-ai-vue-root .acx-ai-item{padding:10px 14px 10px 18px;border-bottom:1px solid rgba(30,42,47,.07);position:relative;cursor:pointer}
+    #autocx-ai-vue-root .acx-ai-item:hover{background:rgba(250,250,245,.6)}
+    #autocx-ai-vue-root .acx-ai-item.on{background:#FAFAF5}
+    #autocx-ai-vue-root .acx-ai-item.on::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#C2453A}
+    #autocx-ai-vue-root .acx-ai-item .num{font:600 10px/1 Georgia,serif;color:#C2453A;letter-spacing:.04em}
+    #autocx-ai-vue-root .acx-ai-item .q{font-size:10.5px;color:#334246;margin-top:4px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    #autocx-ai-vue-root .acx-ai-item .st{font-size:9px;color:#8B9495;margin-top:4px;display:flex;align-items:center;gap:4px}
+    #autocx-ai-vue-root .acx-ai-item .st i{width:5px;height:5px;border-radius:50%;background:#2F8F5B;display:inline-block;flex:none}
+    #autocx-ai-vue-root .acx-ai-item .st.live i{background:#C2453A;animation:acx-pulse 1.4s infinite}
+    #autocx-ai-vue-root .acx-ai-item .st.bad i{background:#C2453A}
+    @keyframes acx-pulse{0%,100%{box-shadow:0 0 0 0 rgba(194,69,58,.4)}50%{box-shadow:0 0 0 4px rgba(194,69,58,0)}}
+    #autocx-ai-vue-root .acx-ai-rail-foot{padding:10px 14px 12px;border-top:1px solid rgba(30,42,47,.12);font-size:9.5px;color:#7C8688}
+    #autocx-ai-vue-root .acx-ai-rail-foot .bar{height:3px;background:rgba(30,42,47,.12);margin:6px 0}
+    #autocx-ai-vue-root .acx-ai-rail-foot .bar i{display:block;height:100%;background:#C2453A}
+    #autocx-ai-vue-root .acx-ai-rail-foot .row{display:flex;justify-content:space-between}
+    #autocx-ai-vue-root .acx-ai-rail-foot .row b{color:#1E2A2F;font-weight:600}
+    #autocx-ai-vue-root .acx-ai-maincol{flex:1;min-width:0;display:flex;flex-direction:column}
+    #autocx-ai-vue-root .acx-ai-session{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:11px 22px 10px 30px;font-size:9.5px;color:#7C8688;border-bottom:1px dotted rgba(30,42,47,.2)}
+    #autocx-ai-vue-root .acx-ai-session b{color:#2E5A75;font-weight:500}
+    #autocx-ai-vue-root .acx-ai-session .sm{border:1px solid rgba(30,42,47,.14);padding:1px 6px;color:#5C6B6E}
+    #autocx-ai-vue-root .acx-ai-thread{flex:1;overflow:auto;padding:12px 24px 6px 30px;position:relative;scrollbar-width:thin}
+    #autocx-ai-vue-root .acx-ai-thread::before{content:"";position:absolute;left:18px;top:0;bottom:0;width:1px;background:rgba(194,69,58,.25)}
+    #autocx-ai-vue-root .acx-ai-empty{color:#8B9495;font-size:11px;line-height:1.9;padding:8px 0}
+    #autocx-ai-vue-root .acx-ai-turn-head{display:flex;align-items:baseline;gap:8px;padding:4px 0 8px;flex-wrap:wrap}
+    #autocx-ai-vue-root .acx-ai-idx{font:600 10px/1 Georgia,serif;color:#C2453A}
+    #autocx-ai-vue-root .acx-ai-q{font:600 14px/1.4 "Songti SC","SimSun",serif;color:#1E2A2F;flex:1;min-width:0}
+    #autocx-ai-vue-root .acx-ai-chip{font-size:9px;border:1px solid rgba(30,42,47,.2);padding:1px 5px;color:#7C8688;white-space:nowrap}
+    #autocx-ai-vue-root .acx-ai-nav{display:flex;align-items:center;gap:2px;margin-left:auto}
+    #autocx-ai-vue-root .acx-ai-nav button{width:20px;height:20px;border:1px solid rgba(30,42,47,.2);background:#FAFAF5;color:#5C6B6E;font:12px/1 Consolas,monospace;cursor:pointer;padding:0}
+    #autocx-ai-vue-root .acx-ai-nav button:disabled{opacity:.35;cursor:default}
+    #autocx-ai-vue-root .acx-ai-nav span{font:9.5px/1 Consolas,monospace;color:#8B9495;padding:0 4px}
+    #autocx-ai-vue-root .acx-ai-follow{font-size:9.5px;border:1px dashed rgba(194,69,58,.5);background:rgba(194,69,58,.04);color:#C2453A;padding:1px 6px;cursor:pointer}
+    #autocx-ai-vue-root .acx-ai-receipt{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid rgba(30,42,47,.14);font-size:10.5px;color:#5C6B6E;background:rgba(250,250,245,.6)}
+    #autocx-ai-vue-root .acx-ai-receipt i{width:6px;height:6px;border-radius:50%;background:#B9C0BB;display:inline-block}
+    #autocx-ai-vue-root .acx-ai-req{border-top:1px solid rgba(30,42,47,.13);padding:9px 0}
+    #autocx-ai-vue-root .acx-ai-req-row{display:flex;align-items:center;gap:8px;font-size:9.5px;color:#7C8688;cursor:pointer;flex-wrap:wrap}
+    #autocx-ai-vue-root .acx-ai-req-row .who{color:#5C6B6E}
+    #autocx-ai-vue-root .acx-ai-req-row .arrow{color:#C2453A}
+    #autocx-ai-vue-root .acx-ai-req-row .m{font-variant-numeric:tabular-nums}
+    #autocx-ai-vue-root .acx-ai-req-row .caret{margin-left:auto;color:#8B9495;font-size:9px;transform:rotate(90deg)}
+    #autocx-ai-vue-root .acx-ai-req.open .caret{transform:rotate(-90deg)}
+    #autocx-ai-vue-root .acx-ai-req-body{display:none;padding-top:7px}
+    #autocx-ai-vue-root .acx-ai-req.open .acx-ai-req-body{display:block}
+    #autocx-ai-vue-root .acx-ai-req-body pre{font:10px/1.6 Consolas,"Courier New",monospace;color:#4C5A5E;white-space:pre-wrap;word-break:break-word;margin:0}
+    #autocx-ai-vue-root .acx-ai-tags{display:flex;gap:5px;margin-top:7px;flex-wrap:wrap}
+    #autocx-ai-vue-root .acx-ai-tags span{font-size:9px;border:1px solid rgba(30,42,47,.16);padding:1px 5px;color:#5C6B6E}
+    #autocx-ai-vue-root .acx-ai-think{border-top:1px solid rgba(30,42,47,.13);padding:9px 0}
+    #autocx-ai-vue-root .acx-ai-think-head{display:flex;align-items:center;gap:6px;font-size:9.5px;font-weight:600;color:#C2453A;margin-bottom:4px;cursor:pointer}
+    #autocx-ai-vue-root .acx-ai-think-head .time{font-weight:400;color:#A78B4A;font-variant-numeric:tabular-nums}
+    #autocx-ai-vue-root .acx-ai-think-head .caret{margin-left:auto;color:#8B9495;font-size:9px;transform:rotate(90deg)}
+    #autocx-ai-vue-root .acx-ai-think.collapsed .acx-ai-think-body{display:none}
+    #autocx-ai-vue-root .acx-ai-think.collapsed .caret{transform:rotate(0)}
+    #autocx-ai-vue-root .acx-ai-think-body{margin:0;font-size:10.5px;line-height:1.7;color:#334246;white-space:pre-wrap;word-break:break-word;
+      background:linear-gradient(transparent 2px,rgba(233,196,106,.38) 2px,rgba(233,196,106,.38) 9px,transparent 9px)}
+    #autocx-ai-vue-root .acx-ai-cursor{display:inline-block;width:6px;height:13px;background:#C2453A;vertical-align:-2px;margin-left:2px;animation:acx-blink 1s steps(2) infinite}
+    @keyframes acx-blink{50%{opacity:0}}
+    #autocx-ai-vue-root .acx-ai-ans{border-top:1px solid rgba(30,42,47,.13);padding:9px 0}
+    #autocx-ai-vue-root .acx-ai-ans-head{display:flex;align-items:center;gap:6px;font-size:9.5px;font-weight:600;color:#C2453A;margin-bottom:4px}
+    #autocx-ai-vue-root .acx-ai-ans-head .time{font-weight:400;color:#8B9495}
+    #autocx-ai-vue-root .acx-ai-ans-body{margin:0;font-size:10.5px;line-height:1.7;color:#1E2A2F;white-space:pre-wrap;word-break:break-word}
+    #autocx-ai-vue-root .acx-ai-ans-body.pending{color:#8B9495}
+    #autocx-ai-vue-root .acx-ai-answer-line{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+    #autocx-ai-vue-root .acx-ai-key{display:inline-block;background:#C2453A;color:#FFF9F0;font:700 15px/1 Georgia,serif;padding:3px 7px}
+    #autocx-ai-vue-root .acx-ai-key.bad{background:#8B9495}
+    #autocx-ai-vue-root .acx-ai-okn{color:#2F6B4E;font-size:9.5px}
+    #autocx-ai-vue-root .acx-ai-badn{color:#C2453A;font-size:9.5px}
+    #autocx-ai-vue-root .acx-ai-err{border:1px dashed rgba(194,69,58,.45);background:rgba(194,69,58,.035);padding:8px 10px;font-size:10.5px;line-height:1.7;color:#8A3A31;margin-top:8px}
+    #autocx-ai-vue-root .acx-ai-err b{color:#C2453A}
+    #autocx-ai-vue-root .acx-ai-foot2{display:flex;align-items:center;gap:10px;padding-top:7px;border-top:1px dotted rgba(30,42,47,.18);margin-top:8px;font-size:9px;color:#8B9495}
+    #autocx-ai-vue-root .acx-ai-foot2 .acts{margin-left:auto}
+    #autocx-ai-vue-root .acx-ai-foot2 button{border:0;background:none;color:#7C8688;font-size:9.5px;cursor:pointer;padding:2px 5px}
+    #autocx-ai-vue-root .acx-ai-foot2 button:hover{color:#C2453A}
+    #autocx-ai-vue-root .acx-ai-submit-strip{padding:0 24px 8px 30px}
+    #autocx-ai-vue-root .acx-ai-submit-card{border:1px dashed rgba(194,69,58,.5);background:rgba(194,69,58,.035);padding:7px 10px;font-size:9.5px;color:#7A4A43;display:flex;gap:8px;align-items:flex-start}
+    #autocx-ai-vue-root .acx-ai-submit-card b{color:#C2453A;font-weight:600;white-space:nowrap}
+    #autocx-ai-vue-root .acx-ai-submit-card ul{margin:2px 0 0;padding-left:14px}
+    #autocx-ai-vue-root .acx-ai-note{flex:none;display:flex;align-items:center;gap:6px;border-top:1px solid rgba(30,42,47,.15);padding:9px 20px 9px 30px;background:#F7F7F0;font-size:9px;color:#8B9495}
+    #autocx-ai-vue-root .acx-ai-note b{color:#7C8688;font-weight:600;margin-right:2px}
+    #autocx-ai-vue-root .acx-ai-note .right{margin-left:auto;display:flex;gap:12px}
+    #autocx-ai-vue-root .acx-ai-status{flex:none;display:flex;align-items:center;gap:9px;padding:8px 20px 9px 30px;border-top:1px solid rgba(194,69,58,.18);background:#FBF7EE;font-size:9.5px;color:#8A6A2F}
+    #autocx-ai-vue-root .acx-ai-status b{color:#C2453A;font-weight:600}
+    #autocx-ai-vue-root .acx-ai-status .right{margin-left:auto;display:flex;gap:8px;color:#8B9099}
+    #autocx-ai-vue-root .acx-ai-status .pill{border:1px solid rgba(30,42,47,.14);padding:1px 6px;color:#5C6B6E}
+    @media (prefers-reduced-motion:reduce){#autocx-ai-vue-root .acx-ai-cursor,#autocx-ai-vue-root .acx-ai-item .st.live i{animation:none}}
+  `;
 
-    const esc = escHtml; // 本模块内的简写
+  const AI_TEMPLATE = `
+    <a-config-provider :theme="antdTheme">
+      <div v-if="s.open" class="acx-ai" @mousedown.self="close">
+        <div class="acx-ai-win" :style="winStyle">
+          <header class="acx-ai-top" @mousedown="startDrag">
+            <div class="acx-ai-seal">AI</div>
+            <div class="acx-ai-title"><b>AI 作答记录</b><span>{{ meta.title || '等待测验…' }}</span></div>
+            <div class="acx-ai-meta">
+              <span class="pill" v-if="meta.model">{{ meta.model }}</span>
+              <span class="pill" v-if="meta.effort">effort {{ meta.effort }}</span>
+              <span>只读</span>
+              <button class="acx-ai-copy" @click="copyAll" title="复制全部记录">⧉</button>
+              <button class="acx-ai-close" @click="close" title="关闭 (Esc)">×</button>
+            </div>
+          </header>
+          <div class="acx-ai-main">
+            <aside class="acx-ai-rail">
+              <div class="acx-ai-rail-head"><b>本次测验</b><span>{{ meta.concurrency ? meta.concurrency + ' 路并发' : '' }}</span></div>
+              <div class="acx-ai-items" role="tablist" aria-orientation="vertical" aria-label="本次测验的题目">
+                <div v-for="n in s.order" :key="n" class="acx-ai-item" :class="{ on: currentN === n }" role="tab"
+                  :aria-selected="currentN === n ? 'true' : 'false'" tabindex="0"
+                  @click="selectQuestion(n)" @keydown.enter.prevent="selectQuestion(n)" @keydown.space.prevent="selectQuestion(n)">
+                  <div class="num">{{ pad2(n) }}</div>
+                  <div class="q">{{ (s.convs[n] && s.convs[n].stem) || '(读取中)' }}</div>
+                  <div class="st" :class="phaseInfo(s.convs[n] || { n: n, phase: 'queued' }).dot">
+                    <i></i>{{ phaseInfo(s.convs[n] || { n: n, phase: 'queued' }).text }}
+                  </div>
+                </div>
+                <div v-if="!s.order.length" class="acx-ai-empty" style="padding:8px 12px">暂无题目</div>
+              </div>
+              <div class="acx-ai-rail-foot">
+                <div class="row"><span>已答</span><b>{{ done }} / {{ total }}</b></div>
+                <div class="bar"><i :style="{ width: total ? Math.round(done / total * 100) + '%' : '0%' }"></i></div>
+                <div class="row"><span>{{ bad ? bad + ' 题失败' : (total - done > 0 ? (total - done) + ' 题未答' : '全部完成') }}</span><span>{{ s.meta && s.meta.submitState === 'off' ? '自动提交 关' : '' }}</span></div>
+              </div>
+            </aside>
+            <main class="acx-ai-maincol">
+              <div class="acx-ai-session" v-if="s.meta">
+                <b>提取</b><span class="sm">{{ (s.meta.count || 0) + ' 题 · ' + (s.meta.source || '未知来源') }}</span>
+                <span v-if="s.meta.startAt">{{ fmtTime(s.meta.startAt) }}</span>
+                <span v-if="s.meta.answeredAt">→ 开始作答 {{ fmtTime(s.meta.answeredAt) }}</span>
+                <span v-if="s.meta.concurrency">→ 并发 {{ s.meta.concurrency }} 路</span>
+                <span v-if="s.meta.note">{{ s.meta.note }}</span>
+              </div>
+              <div class="acx-ai-thread" ref="threadEl" role="tabpanel" aria-label="所选题目的作答记录">
+                <div v-if="!s.order.length" class="acx-ai-empty">还没有记录。<br>测验页开始答题后，脚本发出的每一次请求都会出现在这里。</div>
+                <div v-else class="acx-ai-turn">
+                  <div class="acx-ai-turn-head">
+                    <span class="acx-ai-idx">{{ pad2(currentN) }}</span>
+                    <span class="acx-ai-q">{{ active.stem || '' }}</span>
+                    <span class="acx-ai-chip">{{ typeLabel(active.type) }}</span>
+                    <span class="acx-ai-chip" v-if="active.decode">解码 {{ active.decode.mapped || 0 }}/{{ active.decode.total || 0 }} · {{ Math.round((active.decode.conf || 0) * 100) }}%<template v-if="active.grade"> · {{ active.grade }}</template></span>
+                    <button class="acx-ai-follow" v-if="!s.follow && liveN && liveN !== currentN" @click="s.follow = true">回到当前题 {{ pad2(liveN) }}</button>
+                    <span class="acx-ai-nav" v-if="total > 1">
+                      <button @click="stepQuestion(-1)" :disabled="currentIndex <= 0" title="上一题">‹</button>
+                      <span>{{ currentIndex + 1 }} / {{ total }}</span>
+                      <button @click="stepQuestion(1)" :disabled="currentIndex >= total - 1" title="下一题">›</button>
+                    </span>
+                  </div>
+
+                  <div v-if="active.phase === 'queued'" class="acx-ai-receipt"><i></i>排队中 —— 并发已占满，前面的题结束后自动开始</div>
+                  <template v-else>
+                    <div class="acx-ai-req" :class="{ open: s.openReq[currentN] || active.phase === 'requesting' }">
+                      <div class="acx-ai-req-row" @click="toggleReq(currentN)">
+                        <span class="who">脚本</span><span class="arrow">→</span>
+                        <span class="who">{{ (active.params && active.params.model) || 'model' }}</span>
+                        <span class="m">{{ fmtTime((active.t || {}).reqAt) }}</span>
+                        <span class="m">prompt {{ (active.prompt || '').length }} 字</span>
+                        <span class="caret">›</span>
+                      </div>
+                      <div class="acx-ai-req-body">
+                        <pre>{{ active.prompt || '(未记录 prompt)' }}</pre>
+                        <div class="acx-ai-tags">
+                          <span v-if="active.params && active.params.temperature != null">temperature {{ active.params.temperature }}</span>
+                          <span>stream: {{ active.streamed === false ? 'false' : 'true' }}</span>
+                          <span v-if="active.params && active.params.effort">reasoning_effort: {{ active.params.effort }}</span>
+                          <span v-if="active.source">来源 {{ active.source }}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div v-if="active.thinking || active.phase === 'thinking' || active.phase === 'answering' || active.phase === 'parsed' || active.phase === 'filled'" class="acx-ai-think" :class="{ collapsed: s.openTurn[currentN] }">
+                      <div class="acx-ai-think-head" @click="toggleThink(currentN)">
+                        <span>{{ active.thinking ? (active.phase === 'thinking' ? '思考中' : '思考过程') : '该模型未返回思考过程' }}</span>
+                        <span class="time" v-if="active.thinking">{{ thinkTime(active) }}</span>
+                        <span class="caret" v-if="active.thinking">›</span>
+                      </div>
+                      <p class="acx-ai-think-body" v-if="active.thinking">{{ active.thinking }}<span class="acx-ai-cursor" v-if="active.phase === 'thinking'"></span></p>
+                      <p class="acx-ai-think-body" v-else-if="active.phase === 'thinking'">等待模型吐出第一个思考片段…</p>
+                    </div>
+
+                    <div v-if="active.phase === 'failed'" class="acx-ai-err">
+                      <b>失败</b> · 第 {{ active.attempt || 1 }} 次尝试<br>{{ (active.error && active.error.message) || '未知错误' }}
+                      <template v-if="active.error && active.error.hint"><br><span style="color:#8A6A2F">{{ active.error.hint }}</span></template>
+                    </div>
+                    <div v-else class="acx-ai-ans">
+                      <div class="acx-ai-ans-head"><span>回答</span><span class="time">{{ answerTime(active) }}</span></div>
+                      <p class="acx-ai-ans-body" :class="{ pending: !active.answer }">{{ active.answer || (active.phase === 'thinking' ? '模型还在想，回答会在这里逐字出现…' : '等待回答…') }}<span class="acx-ai-cursor" v-if="active.phase === 'answering'"></span></p>
+                      <div class="acx-ai-answer-line" v-if="active.result && active.result.display" style="margin-top:7px">
+                        <span class="acx-ai-key" :class="{ bad: active.result.ok === false }">{{ active.result.display }}</span>
+                        <span v-if="active.result.normalized">解析 → {{ active.result.normalized }}</span>
+                        <span class="acx-ai-okn" v-if="active.result.fillOk">✓ 已在页面上勾选</span>
+                        <span class="acx-ai-okn" v-if="active.result.verifyOk === true">✓ 回读校验一致</span>
+                        <span class="acx-ai-badn" v-if="active.result.verifyOk === false">✗ 回读不一致</span>
+                      </div>
+                    </div>
+                  </template>
+
+                  <div class="acx-ai-foot2">
+                    <span>{{ metaText(active) }}</span>
+                    <span class="acts"><button @click="copyTurn(active)">复制本题</button></span>
+                  </div>
+                </div>
+              </div>
+              <div class="acx-ai-submit-strip" v-if="submitText || s.submitEvents.length">
+                <div class="acx-ai-submit-card">
+                  <b>提交轨迹</b>
+                  <div v-if="s.submitEvents.length"><ul><li v-for="(e, i) in s.submitEvents.slice(-8)" :key="i">{{ fmtTime(e.ts) }} · {{ e.text || e.state || '' }}</li></ul></div>
+                  <span v-else>{{ submitText }}</span>
+                </div>
+              </div>
+              <div class="acx-ai-note"><b>只读记录</b><span>不提供输入，不改答案；模型输出按纯文本转义展示。</span><span class="right"><span>AutoCX v{{ version }}</span><a :href="repo.github" target="_blank" rel="noopener noreferrer">GitHub</a><span>MIT</span></span></div>
+            </main>
+          </div>
+          <footer class="acx-ai-status">
+            <span v-html="statusHtml"></span>
+            <span class="right"><span class="pill" v-if="meta.keyTail">密钥 ●●●●{{ meta.keyTail }}</span><span class="pill" v-if="meta.host">{{ meta.host }}</span></span>
+          </footer>
+        </div>
+      </div>
+    </a-config-provider>
+  `;
+
+  function createAIWindow() {
+    const V = (typeof window !== 'undefined' && window.Vue) ? window.Vue : (typeof Vue !== 'undefined' ? Vue : null);
+    const A = (typeof window !== 'undefined' && window.antd) ? window.antd : (typeof antd !== 'undefined' ? antd : null);
+    if (!V || !V.createApp || !A) {
+      return {
+        open() { log.error('ai', 'Vue/AntD 未加载，作答记录窗口不可用'); },
+        close() {}, toggle() {}, refresh() {},
+      };
+    }
+    const { reactive, computed, watch, nextTick, onMounted } = V;
+    const view = reactive({
+      open: false, sid: null, meta: null, order: [], convs: {}, submitEvents: [],
+      openReq: {}, openTurn: {}, sel: 0, follow: true, now: Date.now(), left: null, top: null,
+    });
+    const offs = [];
+    let tick = null;
+    let mounted = false;
+    const safeGet = (k) => { try { return GM_getValue(k); } catch (_) { return undefined; } };
     const pad2 = (n) => (n < 10 ? '0' + n : '' + n);
     const sec = (ts) => (ts ? new Date(ts).toTimeString().slice(0, 8) : '');
     const dur = (ms) => {
@@ -910,396 +1022,67 @@
     };
     const TYPE = { single: '单选', multi: '多选', judge: '判断', blank: '填空' };
     const LIVE = { queued: 1, requesting: 1, thinking: 1, answering: 1 };
-    const state = {
-      sid: null, meta: null, convs: new Map(), order: [],
-      offs: [], submitEvents: [], openReq: new Set(), openTurn: new Set(),
-      pinned: true, raf: 0,
-      sel: 0,          // 当前查看的题号(主从视图的"选中项")
-      follow: true,    // 是否自动跟随"正在跑"的那题;用户手动点题后置 false
-      renderedN: 0,    // 上一次渲染的题号,用来决定切换时是否把滚动归零
-    };
-
-    const $win = $(`<div id="autocx-ai"><div class="cxai-win">
-      <header class="cxai-bar">
-        <div class="cxai-logo">CX</div>
-        <div class="cxai-titles"><h1>AI 作答记录</h1><p class="cxai-sub">等待测验…</p></div>
-        <div class="cxai-grow"></div>
-        <span class="cxai-pill cx-model"></span>
-        <span class="cxai-pill cx-effort"></span>
-        <button class="cxai-icon" data-a="copy" title="复制全部记录">⧉</button>
-        <button class="cxai-icon" data-a="close" title="关闭 (Esc)">×</button>
-      </header>
-      <div class="cxai-body">
-        <aside class="cxai-rail">
-          <div class="cxai-rail-head"><b>本次测验</b><span class="cxai-rail-meta"></span></div>
-          <div class="cxai-items" role="tablist" aria-orientation="vertical" aria-label="本次测验的题目"></div>
-          <div class="cxai-rail-foot">
-            <p><span>已答</span><b class="cxai-done">0 / 0</b></p>
-            <div class="cxai-meter"><i></i></div>
-            <p><span class="cxai-left">等待开始</span><b class="cxai-fail"></b></p>
-          </div>
-        </aside>
-        <main class="cxai-main">
-          <div class="cxai-session"></div>
-          <div class="cxai-thread" id="autocx-ai-detail" role="tabpanel" aria-label="所选题目的作答记录"><div class="cxai-empty">还没有记录。<br>测验页开始答题后,脚本发出的每一次请求都会出现在这里。</div></div>
-          <div class="cxai-submit-strip"></div>
-          <div class="cxai-note"><b>只读记录</b>不提供输入、不改答案;模型输出按纯文本转义展示。
-            <span class="cxai-note-r">AutoCX v${VERSION} · <a href="${REPO.github}" target="_blank" rel="noopener noreferrer">仓库</a></span></div>
-        </main>
-      </div>
-      <footer class="cxai-status">
-        <span class="cxai-submit"></span>
-        <span class="right"><span class="cxai-pill cx-key"></span><span class="cxai-pill cx-host"></span></span>
-      </footer>
-    </div></div>`);
-    $(document.body || document.documentElement).append($win);
-
-    /* ---------- 订阅与数据 ---------- */
-    const safeGet = (k) => { try { return GM_getValue(k); } catch (_) { return undefined; } };
 
     function unbind() {
-      state.offs.forEach((off) => { try { off(); } catch (_) { /* 忽略 */ } });
-      state.offs = [];
-      state.convs.clear();
-      state.order = [];
+      offs.forEach((off) => { try { off(); } catch (_) { /* 忽略 */ } });
+      offs.length = 0;
+      view.convs = {};
+      view.order = [];
     }
-
     function bind(sid) {
-      if (state.sid === sid) return;
+      if (view.sid === sid) return;
       unbind();
-      state.sid = sid;
-      state.meta = null;
-      state.submitEvents = [];
-      if (!sid) { draw(); return; }
+      view.sid = sid;
+      view.meta = null;
+      view.submitEvents = [];
+      if (!sid) return;
       const meta = safeGet(AI_S(sid));
-      state.offs.push(aibus.on(AI_S(sid), (m) => { if (m) applyMeta(m); }));
       if (meta) applyMeta(meta);
-      draw();
+      offs.push(aibus.on(AI_S(sid), (m) => { if (m) applyMeta(m); }));
     }
-
     function applyMeta(meta) {
-      state.meta = meta;
-      state.submitEvents = Array.isArray(meta.events) ? meta.events.slice() : [];
+      view.meta = meta;
+      view.submitEvents = Array.isArray(meta.events) ? meta.events.slice() : [];
       const count = Number(meta.count) || 0;
-      const bound = new Set(state.order);
+      const bound = new Set(view.order);
       for (let i = 1; i <= count; i++) {
         const n = i;
         if (bound.has(n)) continue;
-        const cur = safeGet(AI_C(state.sid, n));
+        const cur = safeGet(AI_C(view.sid, n));
         if (cur) {
-          state.convs.set(n, cur);
-          if (!state.order.includes(n)) state.order.push(n);
+          view.convs[n] = cur;
+          if (!view.order.includes(n)) view.order.push(n);
         }
-        state.offs.push(aibus.on(AI_C(state.sid, n), (v) => { if (v) { state.convs.set(n, v); upsertOrder(n); schedule(); } }));
+        offs.push(aibus.on(AI_C(view.sid, n), (v) => {
+          if (v) {
+            view.convs[n] = v;
+            if (!view.order.includes(n)) { view.order.push(n); view.order.sort((a, b) => a - b); }
+            view.now = Date.now();
+          }
+        }));
       }
-      state.order.sort((a, b) => a - b);
-      schedule();
+      view.order.sort((a, b) => a - b);
     }
-
-    function upsertOrder(n) {
-      if (!state.order.includes(n)) { state.order.push(n); state.order.sort((a, b) => a - b); }
-    }
-
-    function schedule() {
-      if (state.raf || !$win.hasClass('open')) return;
-      state.raf = requestAnimationFrame(() => { state.raf = 0; draw(); });
-    }
-
-    /* ---------- 渲染 ---------- */
     function phaseInfo(c) {
       const t = c.t || {};
-      const now = Date.now();
+      const now = view.now;
       if (c.phase === 'queued') return { dot: '', text: '排队中' };
       if (c.phase === 'requesting') return { dot: 'live', text: '请求中 · ' + dur(now - (t.reqAt || now)) };
       if (c.phase === 'thinking') return { dot: 'live', text: '思考中 · ' + dur(now - (t.reqAt || now)) };
       if (c.phase === 'answering') return { dot: 'live', text: '回答中 · ' + dur(now - (t.reqAt || now)) };
-      if (c.phase === 'parsed') return { dot: 'live', text: '已解析 · ' + (c.result && c.result.display || '') };
-      if (c.phase === 'filled') return { dot: 'ok', text: '已完成 · ' + (c.result && c.result.display || '') + (c.result && c.result.fillOk ? ' · 已勾选' : '') };
+      if (c.phase === 'parsed') return { dot: 'live', text: '已解析 · ' + ((c.result && c.result.display) || '') };
+      if (c.phase === 'filled') return { dot: 'ok', text: '已完成 · ' + ((c.result && c.result.display) || '') + (c.result && c.result.fillOk ? ' · 已勾选' : '') };
       if (c.phase === 'failed') return { dot: 'bad', text: '失败' + (c.error && c.error.message ? ' · ' + String(c.error.message).slice(0, 18) : '') };
       return { dot: '', text: c.phase || '' };
     }
-
-    function draw() {
-      drawHeader();
-      drawDetail();   // 先定"选中哪题",侧栏的 aria-selected 才跟得上
-      drawRail();
-      drawSession();
-      drawStatus();
-    }
-
-    function drawHeader() {
-      const m = state.meta || {};
-      $win.find('.cxai-sub').text(m.title || '等待测验…');
-      $win.find('.cx-model').text(m.model || '');
-      $win.find('.cx-effort').text(m.effort ? 'effort ' + m.effort : '');
-      $win.find('.cx-key').text(m.keyTail ? '密钥 ●●●●' + m.keyTail : '');
-      $win.find('.cx-host').text(m.host || '');
-    }
-
-    function drawRail() {
-      const total = (state.meta && state.meta.count) || state.order.length;
-      let done = 0;
-      let bad = 0;
-      state.order.forEach((n) => {
-        const c = state.convs.get(n) || {};
-        if (c.phase === 'filled' || c.phase === 'parsed') done++;
-        if (c.phase === 'failed') bad++;
-      });
-      const $items = $win.find('.cxai-items').empty();
-      state.order.forEach((n) => {
-        const c = state.convs.get(n) || { n, phase: 'queued' };
-        const info = phaseInfo(c);
-        const on = (c.phase === 'requesting' || c.phase === 'thinking' || c.phase === 'answering') ? ' on' : '';
-        const selected = state.sel === n;
-        $items.append([
-          '<div class="cxai-item' + on + '" data-n="' + n + '" role="tab" tabindex="' + (selected ? 0 : -1) + '"'
-          + ' aria-selected="' + (selected ? 'true' : 'false') + '" aria-controls="autocx-ai-detail">',
-          '<div class="n">' + pad2(n) + '</div>',
-          '<div class="tx"><div class="q">' + esc(c.stem || '(读取中)') + '</div>',
-          '<div class="st"><i class="cxai-dot ' + info.dot + '"></i>' + esc(info.text) + '</div></div>',
-          '</div>',
-        ].join(''));
-      });
-      if (!state.order.length) $items.append('<div class="cxai-empty" style="padding:6px 10px">暂无题目</div>');
-      $win.find('.cxai-rail-meta').text(state.meta && state.meta.concurrency ? state.meta.concurrency + ' 路并发' : '');
-      $win.find('.cxai-done').text(done + ' / ' + total);
-      $win.find('.cxai-meter i').css('width', total ? Math.round(done / total * 100) + '%' : '0%');
-      $win.find('.cxai-left').text(state.meta && state.meta.submitState ? '提交' : '待你核对提交');
-      $win.find('.cxai-fail').text(bad ? bad + ' 题失败' : (total - done > 0 ? (total - done) + ' 题未答' : '全部完成'));
-    }
-
-    function drawSession() {
-      const m = state.meta;
-      const $s = $win.find('.cxai-session');
-      if (!m) { $s.empty(); return; }
-      const parts = [];
-      parts.push('<span class="k">提取</span><span class="cxai-sm">' + esc((m.count || 0) + ' 题 · ' + (m.source || '未知来源')) + '</span>');
-      if (m.startAt) parts.push('<span class="m">' + esc(sec(m.startAt)) + '</span>');
-      if (m.answeredAt) parts.push('<span class="k">→ 开始作答</span><span class="m">' + esc(sec(m.answeredAt)) + '</span>');
-      if (m.concurrency) parts.push('<span class="k">→ 并发</span><span class="cxai-sm">' + m.concurrency + ' 路</span>');
-      if (m.note) parts.push('<span class="cxai-sm">' + esc(m.note) + '</span>');
-      $s.html(parts.join(''));
-    }
-
-    function liveIndex() {
-      return state.order.find((n) => LIVE[(state.convs.get(n) || {}).phase]) || 0;
-    }
-
-    /** 主从视图:右边只画"选中的那一题",不再把所有题堆成一条时间线 */
-    function drawDetail() {
-      const $t = $win.find('.cxai-thread');
-      const el = $t[0];
-      if (!state.order.length) {
-        $t.html('<div class="cxai-empty">还没有记录。<br>测验页开始答题后,脚本发出的每一次请求都会出现在这里。</div>');
-        drawSubmitStrip();
-        state.renderedN = 0;
-        return;
-      }
-      // 跟随模式:视图停在"正在跑"的那题;没有在跑就留在原地(首次打开则停在最后一题)
-      if (state.follow) {
-        const live = liveIndex();
-        if (live) state.sel = live;
-        else if (!state.sel) state.sel = state.order[state.order.length - 1];
-      }
-      if (!state.sel || !state.order.includes(state.sel)) state.sel = state.order[0];
-
-      const n = state.sel;
-      const c = state.convs.get(n) || { n: n, phase: 'queued' };
-      const keepTop = el ? el.scrollTop : 0;
-      const atBottom = el ? (el.scrollHeight - el.clientHeight - keepTop < 40) : false;
-      $t.empty().append(turn(c));
-      if (el) {
-        if (state.renderedN !== n) el.scrollTop = 0;          // 换题:回到顶部
-        else if (atBottom) el.scrollTop = el.scrollHeight;    // 同一题:原来贴底就继续贴底
-        else el.scrollTop = keepTop;
-      }
-      state.renderedN = n;
-      drawSubmitStrip();
-    }
-
-    /** 提交轨迹是全局事件,固定在正文下方,不参与单题滚动 */
-    function drawSubmitStrip() {
-      const $s = $win.find('.cxai-submit-strip');
-      if (state.submitEvents.length) { $s.empty().append(submitCard()); return; }
-      const m = state.meta;
-      if (state.order.length && !liveIndex() && m && m.submitState !== 'done') {
-        $s.html('<div class="cxai-submit-card" style="background:#FBFCFE;border-color:#E8ECF3;color:#7C8798">'
-          + '⏸ ' + esc(m.submitState === 'off' ? '自动提交已关闭:答案已填写,提交请你在答卷页自己点。' : '等待全部题目答完后再判断是否提交。')
-          + '</div>');
-        return;
-      }
-      $s.empty();
-    }
-
-    function selectQuestion(n) {
-      const idx = state.order.indexOf(n);
-      if (idx < 0) return;
-      if (n === state.sel) { state.follow = false; drawDetail(); return; }
-      state.follow = false;
-      state.sel = n;
-      drawDetail();
-    }
-
+    function liveIndex() { return view.order.find((n) => LIVE[(view.convs[n] || {}).phase]) || 0; }
+    function selectQuestion(n) { if (!view.order.includes(n)) return; view.follow = false; view.sel = n; }
     function stepQuestion(delta) {
-      const idx = state.order.indexOf(state.sel);
-      if (idx < 0) return;
-      const next = state.order[Math.min(state.order.length - 1, Math.max(0, idx + delta))];
-      if (!next || next === state.sel) return;
-      state.follow = false;
-      state.sel = next;
-      drawDetail();
+      const idx = view.order.indexOf(view.sel || view.order[0]);
+      const next = view.order[Math.min(view.order.length - 1, Math.max(0, idx + delta))];
+      if (next && next !== view.sel) { view.follow = false; view.sel = next; }
     }
-
-    function turn(c) {
-      const n = c.n;
-      const info = phaseInfo(c);
-      const $t = $('<section class="cxai-turn"></section>');
-      const total = state.order.length;
-      const idx = state.order.indexOf(n);
-      const live = liveIndex();
-      const navHtml = total > 1
-        ? '<span class="cxai-nav">'
-          + '<button data-nav="prev"' + (idx <= 0 ? ' disabled' : '') + ' title="上一题 (←)">‹</button>'
-          + '<span class="cxai-nav-n">' + (idx + 1) + ' / ' + total + '</span>'
-          + '<button data-nav="next"' + (idx >= total - 1 ? ' disabled' : '') + ' title="下一题 (→)">›</button>'
-          + '</span>'
-        : '';
-      const followHtml = (!state.follow && live && live !== n)
-        ? '<button class="cxai-follow" data-a="follow">回到当前题 ' + pad2(live) + '</button>' : '';
-      $t.append('<div class="cxai-turn-head"><span class="cxai-idx">' + pad2(n) + '</span>'
-        + '<span class="cxai-q">' + esc(c.stem || '') + '</span>'
-        + '<span class="cxai-chip">' + esc(TYPE[c.type] || '') + '</span>'
-        + (c.decode ? '<span class="cxai-chip" title="字体解码:命中/密文字，以及该题定级">'
-          + '解码 ' + (c.decode.mapped || 0) + '/' + (c.decode.total || 0)
-          + ' · ' + Math.round((c.decode.conf || 0) * 100) + '%'
-          + (c.grade ? ' · ' + esc(c.grade) : '')
-          + '</span>' : '')
-        + followHtml
-        + navHtml
-        + '</div>');
-      $t.find('[data-nav]').on('click', function () {
-        stepQuestion(this.getAttribute('data-nav') === 'next' ? 1 : -1);
-      });
-      $t.find('[data-a=follow]').on('click', () => { state.follow = true; drawDetail(); });
-      if (c.phase === 'queued') {
-        $t.append('<div class="cxai-receipt" style="cursor:default"><span class="cxai-dot"></span>'
-          + '<span class="q">排队中 —— 并发已占满,前面的题结束后自动开始</span></div>');
-        return $t;
-      }
-      // 请求块
-      const params = c.params || {};
-      const $req = $('<div class="cxai-req"></div>');
-      const $row = $('<div class="cxai-req-row"><span class="who">脚本</span><span class="arrow">→</span>'
-        + '<span class="who">' + esc(params.model || 'model') + '</span>'
-        + '<span class="cxai-m">' + esc(sec((c.t || {}).reqAt)) + '</span>'
-        + '<span class="cxai-m">prompt ' + String((c.prompt || '').length) + ' 字</span>'
-        + '<span class="cxai-caret-r" style="margin-left:auto">›</span></div>');
-      $row.on('click', () => {
-        const open = !$req.hasClass('open');
-        $req.toggleClass('open', open);
-        if (open) state.openReq.add(n); else state.openReq.delete(n);
-        drawDetail();
-      });
-      $req.append($row);
-      const tags = [
-        params.temperature != null ? 'temperature ' + params.temperature : '',
-        'stream: ' + (c.streamed === false ? 'false' : 'true'),
-        params.effort ? 'reasoning_effort: ' + params.effort : '',
-        c.source ? '来源 ' + c.source : '',
-      ].filter(Boolean).map((x) => '<span class="cxai-chip">' + esc(x) + '</span>').join('');
-      $req.append('<div class="cxai-req-body"><pre>' + esc(c.prompt || '(未记录 prompt)') + '</pre>'
-        + '<div class="cxai-tags">' + tags + '</div></div>');
-      if (state.openReq.has(n) || c.phase === 'requesting') $req.addClass('open');
-      $t.append($req);
-      // 思考块
-      if (c.thinking) {
-        const expanded = !state.openTurn.has(-n); // 负数键表示"用户手动折叠/展开"
-        $t.append('<div class="cxai-think' + (expanded ? '' : ' collapsed') + '">'
-          + '<div class="cxai-think-head"><span class="lbl">' + (c.phase === 'thinking' ? '思考中' : '思考过程') + '</span>'
-          + '<span class="time">' + esc(thinkTime(c)) + '</span><span class="cxai-caret-r" style="margin-left:auto">›</span></div>'
-          + '<p class="cxai-think-body">' + esc(c.thinking) + (c.phase === 'thinking' ? '<span class="cxai-cursor"></span>' : '') + '</p>'
-          + '</div>');
-      } else if (c.phase === 'thinking') {
-        $t.append('<div class="cxai-think"><div class="cxai-think-head"><span class="lbl">思考中</span>'
-          + '<span class="time">' + esc(dur(Date.now() - ((c.t || {}).reqAt || Date.now()))) + '</span></div>'
-          + '<p class="cxai-think-body">等待模型吐出第一个思考片段…</p></div>');
-      } else if ((c.phase === 'answering' || c.phase === 'parsed' || c.phase === 'filled') && !c.thinking) {
-        $t.append('<div class="cxai-think"><div class="cxai-think-head"><span class="lbl" style="color:#94A0B2">该模型未返回思考过程</span></div></div>');
-      }
-      // 回答块
-      if (c.phase === 'failed') {
-        const err = c.error || {};
-        $t.append('<div class="cxai-err"><b>失败</b> · 第 ' + (c.attempt || 1) + ' 次尝试<br>' + esc(err.message || '未知错误')
-          + (err.hint ? '<br><span style="color:#8A6A2F">' + esc(err.hint) + '</span>' : '') + '</div>');
-      } else {
-        const body = c.answer
-          ? '<p class="cxai-ans-body">' + esc(c.answer) + (c.phase === 'answering' ? '<span class="cxai-cursor"></span>' : '') + '</p>'
-          : '<p class="cxai-ans-body pending">' + (c.phase === 'thinking' ? '模型还在想,回答会在这里逐字出现…' : '等待回答…') + '</p>';
-        const ansTime = (c.t && c.t.firstAnswerAt && c.t.doneAt) ? dur(c.t.doneAt - c.t.firstAnswerAt) : (c.phase === 'answering' ? '生成中' : '');
-        const $ans = $('<div class="cxai-ans"><div class="cxai-ans-head"><span class="lbl">回答</span>'
-          + '<span class="time">' + esc(ansTime) + '</span></div>' + body + '</div>');
-        const res = c.result || {};
-        if (res.display) {
-          const bits = ['<span class="cxai-key ' + (res.ok === false ? 'bad' : 'ok') + '">' + esc(res.display) + '</span>'];
-          if (res.normalized) bits.push('<span>解析 → ' + esc(res.normalized) + '</span>');
-          $ans.append('<div class="cxai-verdict">' + bits.join('<span class="cxai-sep"></span>')
-            + (res.fillOk ? '<span class="cxai-sep"></span><span class="cxai-okn">✓ 已在页面上勾选</span>' : '')
-            + (res.verifyOk === true ? '<span class="cxai-sep"></span><span class="cxai-okn">✓ 回读校验一致</span>' : '')
-            + (res.verifyOk === false ? '<span class="cxai-sep"></span><span class="cxai-badn">✗ 回读不一致</span>' : '')
-            + '</div>');
-        }
-        $t.append($ans);
-      }
-      // 页脚
-      const t = c.t || {};
-      const metaBits = [];
-      if (c.usage) {
-        if (c.usage.completion_tokens != null) metaBits.push('回答 ' + c.usage.completion_tokens + ' tok');
-        if (c.usage.total_tokens != null) metaBits.push('共 ' + c.usage.total_tokens + ' tok');
-      }
-      if (t.reqAt && t.doneAt) metaBits.push(dur(t.doneAt - t.reqAt));
-      if (c.streamed === false) metaBits.push('非流式回放');
-      const $f = $('<div class="cxai-foot2"><span class="cxai-m">' + esc(metaBits.join(' · ') || info.text) + '</span>'
-        + '<span class="acts"><button data-a="copyturn">复制本题</button></span></div>');
-      $t.find('.cxai-think-head').on('click', function () { $(this).parent().toggleClass('collapsed'); });
-      $f.find('[data-a=copyturn]').on('click', () => copy(turnText(c), ''));
-      $t.append($f);
-      return $t;
-    }
-
-    function thinkTime(c) {
-      const t = c.t || {};
-      if (t.firstThinkAt && t.firstAnswerAt) return dur(t.firstAnswerAt - t.firstThinkAt);
-      if (t.firstThinkAt) return dur(Date.now() - t.firstThinkAt);
-      return '';
-    }
-
-    function submitCard() {
-      const ev = state.submitEvents.slice(-8);
-      const $c = $('<div class="cxai-submit-card"><div><b>提交轨迹</b><ul></ul></div></div>');
-      ev.forEach((e) => {
-        $c.find('ul').append('<li>' + esc(sec(e.ts)) + ' · ' + esc(e.text || e.state || '') + '</li>');
-      });
-      return $c;
-    }
-
-    function drawStatus() {
-      const m = state.meta;
-      const $s = $win.find('.cxai-submit');
-      if (!m) { $s.html(''); return; }
-      const st = m.submitState;
-      const label = {
-        off: '<b>自动提交 关</b> 开启后也只在全部题目答完时触发',
-        wait: '<b>自动提交 开</b> 等待全部题目答完',
-        ready: '<b>自动提交 开</b> 全部答完,即将提交',
-        done: '<b>已提交</b> ' + esc(m.submitDetail || ''),
-        blocked: '<b>未提交</b> ' + esc(m.submitDetail || '有未答题,已停下等你'),
-        captcha: '<b>未提交</b> 出现验证码,转人工',
-      }[st] || '<b>自动提交 关</b>';
-      $s.html(label);
-    }
-
-    /* ---------- 复制 ---------- */
+    function copy(text, label) { try { GM_setClipboard(text); } catch (_) { /* 剪贴板不可用 */ } log.info('ai', '已复制' + (label || '记录')); }
     function turnText(c) {
       const lines = [
         `# 第 ${c.n} 题 [${TYPE[c.type] || c.type}] ${c.stem || ''}`,
@@ -1314,127 +1097,182 @@
       }
       return lines.join('\n');
     }
-    function copy(text, label) {
-      try { GM_setClipboard(text); } catch (_) { /* 剪贴板不可用就静默 */ }
-      log.info('ai', '已复制' + (label || '记录'));
+    function open() {
+      view.open = true;
+      place();
+      unbind();
+      view.sid = null;
+      bind(safeIndex());
+      view.now = Date.now();
+      if (!tick) tick = setInterval(() => { if (view.open) view.now = Date.now(); }, 500);
+      setTimeout(() => {
+        if (!view.open) return;
+        const sid = safeIndex();
+        if (sid !== view.sid) bind(sid); else view.now = Date.now();
+      }, 150);
     }
-
-    /* ---------- 位置/开关 ---------- */
-    function clamp() {
-      const el = $win.find('.cxai-win').get(0);
-      if (!el) return;
-      const r = el.getBoundingClientRect();
-      const left = Math.min(Math.max(0, r.left), Math.max(0, window.innerWidth - r.width));
-      const top = Math.min(Math.max(0, r.top), Math.max(0, window.innerHeight - r.height));
-      $win.find('.cxai-win').css({ left: left + 'px', top: top + 'px' });
-    }
+    function close() { view.open = false; if (tick) { clearInterval(tick); tick = null; } }
+    function refresh() { view.now = Date.now(); }
     function place() {
       const pos = config.get('autocx.ai.winPos');
-      const $w = $win.find('.cxai-win');
       if (pos && pos.left != null) {
-        $w.css({ left: pos.left + 'px', top: pos.top + 'px' });
+        view.left = pos.left;
+        view.top = pos.top;
       } else {
-        $w.css({
-          left: Math.max(0, Math.round((window.innerWidth - 900) / 2)) + 'px',
-          top: Math.max(0, Math.round((window.innerHeight - 640) / 2)) + 'px',
-        });
+        view.left = Math.max(0, Math.round((window.innerWidth - 980) / 2));
+        view.top = Math.max(0, Math.round((window.innerHeight - 640) / 2));
       }
       setTimeout(clamp, 30);
     }
-    function draggable() {
-      $win.find('.cxai-bar').on('mousedown', (e0) => {
-        if ($(e0.target).closest('button').length) return;
-        const rect0 = $win.find('.cxai-win').get(0).getBoundingClientRect();
-        const dx = e0.clientX - rect0.left;
-        const dy = e0.clientY - rect0.top;
-        const onMove = (e) => {
-          const $w = $win.find('.cxai-win');
-          const rect = $w.get(0).getBoundingClientRect();
-          $w.css({
-            left: Math.min(Math.max(0, e.clientX - dx), Math.max(0, window.innerWidth - rect.width)) + 'px',
-            top: Math.min(Math.max(0, e.clientY - dy), Math.max(0, window.innerHeight - rect.height)) + 'px',
-          });
-        };
-        const onUp = () => {
-          $(document).off('mousemove', onMove).off('mouseup', onUp);
-          const pr = $win.find('.cxai-win').get(0).getBoundingClientRect();
-          config.set('autocx.ai.winPos', { left: Math.round(pr.left), top: Math.round(pr.top) });
-        };
-        $(document).on('mousemove', onMove).on('mouseup', onUp);
-        e0.preventDefault();
-      });
+    function clamp() {
+      const el = document.querySelector('#autocx-ai-vue-root .acx-ai-win');
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      view.left = Math.round(Math.min(Math.max(0, r.left), Math.max(0, window.innerWidth - r.width)));
+      view.top = Math.round(Math.min(Math.max(0, r.top), Math.max(0, window.innerHeight - r.height)));
     }
-
-    const api = {
-      open() {
-        $win.addClass('open');
-        place();
-        unbind();
-        state.sid = null;
-        bind(safeIndex());
-        draw();
-        // GM 存储写入是异步的:150ms 后再校一次,避免首帧读到旧值
-        setTimeout(() => {
-          const sid = safeIndex();
-          if (sid !== state.sid) bind(sid); else draw();
-        }, 150);
-      },
-      close() { $win.removeClass('open'); },
-      toggle() { if ($win.hasClass('open')) api.close(); else api.open(); },
-      refresh() { if ($win.hasClass('open')) { draw(); } },
-    };
-
     function safeIndex() {
       const idx = safeGet(AI_INDEX);
       if (Array.isArray(idx) && idx.length) return idx[0].sid;
       return null;
     }
 
-    // 索引变化(新会话/新测验)时切到最新一份
-    // 索引订阅独立保存:它不能随会话切换被 unbind() 一起解绑
-    state.indexWatch = aibus.on(AI_INDEX, (idx) => {
-      if (!$win.hasClass('open')) return;
-      const list = Array.isArray(idx) ? idx : [];
-      const sid = list.length ? list[0].sid : null;
-      if (sid !== state.sid) bind(sid);
-      else draw();
-    });
+    function mountApp() {
+      if (mounted) return;
+      GM_addStyle(AI_CSS);
+      try { if (typeof unsafeWindow !== 'undefined' && !unsafeWindow.Vue) unsafeWindow.Vue = V; } catch (_) { /* 忽略 */ }
+      const mount = document.createElement('div');
+      mount.id = 'autocx-ai-vue-root';
+      (document.body || document.documentElement).appendChild(mount);
+      const app = V.createApp({
+        template: AI_TEMPLATE,
+        setup() {
+          const threadEl = V.ref(null);
+          const currentN = computed(() => {
+            if (!view.order.length) return 0;
+            if (view.follow) {
+              const live = liveIndex();
+              if (live) return live;
+            }
+            if (!view.sel || !view.order.includes(view.sel)) return view.order[0];
+            return view.sel;
+          });
+          const active = computed(() => view.convs[currentN.value] || { n: currentN.value, phase: 'queued' });
+          const total = computed(() => view.order.length);
+          const done = computed(() => view.order.filter((n) => { const c = view.convs[n] || {}; return c.phase === 'filled' || c.phase === 'parsed'; }).length);
+          const bad = computed(() => view.order.filter((n) => (view.convs[n] || {}).phase === 'failed').length);
+          const meta = computed(() => view.meta || {});
+          const currentIndex = computed(() => Math.max(0, view.order.indexOf(currentN.value)));
+          const liveN = computed(() => liveIndex());
+          const winStyle = computed(() => view.left == null ? {} : { left: view.left + 'px', top: view.top + 'px' });
+          const version = VERSION;
+          const repo = REPO;
+          const antdTheme = {
+            token: {
+              colorPrimary: '#C2453A', colorText: '#1E2A2F', colorBgContainer: '#FAFAF5',
+              colorBorder: 'rgba(30,42,47,.25)', borderRadius: 2, controlHeight: 28,
+              fontFamily: '-apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+            },
+          };
+          const typeLabel = (t) => TYPE[t] || '';
+          const fmtTime = (ts) => sec(ts);
+          const thinkTime = (c) => {
+            const t = c.t || {};
+            if (t.firstThinkAt && t.firstAnswerAt) return dur(t.firstAnswerAt - t.firstThinkAt);
+            if (t.firstThinkAt) return dur(view.now - t.firstThinkAt);
+            return '';
+          };
+          const answerTime = (c) => {
+            const t = c.t || {};
+            if (t.firstAnswerAt && t.doneAt) return dur(t.doneAt - t.firstAnswerAt);
+            if (c.phase === 'answering') return '生成中';
+            return '';
+          };
+          const toggleReq = (n) => { view.openReq[n] = !view.openReq[n]; };
+          const toggleThink = (n) => { view.openTurn[n] = !view.openTurn[n]; };
+          const metaText = (c) => {
+            const t = c.t || {};
+            const bits = [];
+            if (c.usage && c.usage.completion_tokens != null) bits.push('回答 ' + c.usage.completion_tokens + ' tok');
+            if (c.usage && c.usage.total_tokens != null) bits.push('共 ' + c.usage.total_tokens + ' tok');
+            if (t.reqAt && t.doneAt) bits.push(dur(t.doneAt - t.reqAt));
+            if (c.streamed === false) bits.push('非流式回放');
+            return bits.join(' · ') || phaseInfo(c).text;
+          };
+          const submitText = computed(() => {
+            if (view.submitEvents.length) return '';
+            if (!view.order.length || liveIndex() || !view.meta || view.meta.submitState === 'done') return '';
+            return view.meta.submitState === 'off'
+              ? '⏸ 自动提交已关闭：答案已填写，提交请你在答卷页自己点。'
+              : '等待全部题目答完后再判断是否提交。';
+          });
+          const statusHtml = computed(() => {
+            const m = view.meta;
+            if (!m) return '';
+            const st = m.submitState;
+            const map = {
+              off: '<b>自动提交 关</b> 开启后也只在全部题目答完时触发',
+              wait: '<b>自动提交 开</b> 等待全部题目答完',
+              ready: '<b>自动提交 开</b> 全部答完，即将提交',
+              done: '<b>已提交</b> ' + escHtml(m.submitDetail || ''),
+              blocked: '<b>未提交</b> ' + escHtml(m.submitDetail || '有未答题，已停下等你'),
+              captcha: '<b>未提交</b> 出现验证码，转人工',
+            };
+            return map[st] || '<b>自动提交 关</b>';
+          });
+          const close = () => { view.open = false; if (tick) { clearInterval(tick); tick = null; } };
+          const copyAll = () => {
+            const out = view.order.map((n) => turnText(view.convs[n] || { n })).join('\n\n---\n\n');
+            copy(out || '(没有记录)', '全部记录');
+          };
+          const copyTurn = (c) => copy(turnText(c), '');
+          const startDrag = (e) => {
+            if (e.target.closest('button')) return;
+            const el = document.querySelector('#autocx-ai-vue-root .acx-ai-win');
+            if (!el) return;
+            const r = el.getBoundingClientRect();
+            const dx = e.clientX - r.left;
+            const dy = e.clientY - r.top;
+            const move = (ev) => {
+              const rr = el.getBoundingClientRect();
+              view.left = Math.round(Math.min(Math.max(0, ev.clientX - dx), Math.max(0, window.innerWidth - rr.width)));
+              view.top = Math.round(Math.min(Math.max(0, ev.clientY - dy), Math.max(0, window.innerHeight - rr.height)));
+            };
+            const up = () => {
+              document.removeEventListener('mousemove', move);
+              document.removeEventListener('mouseup', up);
+              config.set('autocx.ai.winPos', { left: view.left, top: view.top });
+            };
+            document.addEventListener('mousemove', move);
+            document.addEventListener('mouseup', up);
+            e.preventDefault();
+          };
+          onMounted(() => {
+            window.addEventListener('keydown', (e) => {
+              if (!view.open) return;
+              if (e.key === 'Escape') { close(); return; }
+              if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+              const t = e.target;
+              if (!t || !t.closest || !t.closest('#autocx-ai-vue-root')) return;
+              if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
+              e.preventDefault();
+              stepQuestion(e.key === 'ArrowRight' ? 1 : -1);
+            });
+          });
+          watch(currentN, () => { nextTick(() => { if (threadEl.value) threadEl.value.scrollTop = 0; }); });
+          return {
+            s: view, meta, active, total, done, bad, currentN, currentIndex, liveN, winStyle, version, repo,
+            antdTheme, typeLabel, fmtTime, phaseInfo, thinkTime, answerTime, toggleReq, toggleThink, metaText,
+            submitText, statusHtml, close, copyTurn, copyAll, startDrag, selectQuestion, stepQuestion, pad2,
+          };
+        },
+      });
+      app.use(A);
+      app.mount(mount);
+      mounted = true;
+    }
 
-    $win.find('[data-a=close]').on('click', () => api.close());
-    $win.find('[data-a=copy]').on('click', () => {
-      const out = state.order.map((n) => turnText(state.convs.get(n) || { n })).join('\n\n---\n\n');
-      copy(out || '(没有记录)', '全部记录');
-    });
-    $win.on('mousedown', (e) => { if (e.target === $win.get(0)) api.close(); });
-    $(document).on('keydown', (e) => { if (e.key === 'Escape' && $win.hasClass('open')) api.close(); });
-
-    /* ---- 主从视图:点左边那题 -> 右边只显示那题 ---- */
-    $win.find('.cxai-items').on('click', '.cxai-item', function () {
-      selectQuestion(Number(this.getAttribute('data-n')));
-    });
-    $win.find('.cxai-items').on('keydown', '.cxai-item', function (e) {
-      const n = Number(this.getAttribute('data-n'));
-      const i = state.order.indexOf(n);
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectQuestion(n); return; }
-      if (e.key === 'ArrowDown') { e.preventDefault(); if (state.order[i + 1]) selectQuestion(state.order[i + 1]); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); if (state.order[i - 1]) selectQuestion(state.order[i - 1]); return; }
-      if (e.key === 'Home') { e.preventDefault(); if (state.order[0]) selectQuestion(state.order[0]); return; }
-      if (e.key === 'End') { e.preventDefault(); const last = state.order[state.order.length - 1]; if (last) selectQuestion(last); }
-    });
-    // 焦点在窗口内时,←/→ 翻题(不打断页面本身的键盘操作)
-    $(document).on('keydown', (e) => {
-      if (!$win.hasClass('open')) return;
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-      const t = e.target;
-      if (!t || !t.closest || !t.closest('#autocx-ai')) return;
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
-      e.preventDefault();
-      stepQuestion(e.key === 'ArrowRight' ? 1 : -1);
-    });
-    draggable();
-
-    // 打开即绑定最新会话(可能已在答题中)
-    return api;
+    return { open: () => { mountApp(); open(); }, close, toggle: () => { if (view.open) close(); else { mountApp(); open(); } }, refresh };
   }
 
   /** 调试用:造一份演示记录(不触发任何真实请求),用来离线核对窗口界面 */
@@ -1486,421 +1324,433 @@
     return sid;
   }
 
-  /* ============================== 悬浮面板 ================================= */
-  // 仅在 top 帧渲染;通过 GM_addValueChangeListener 聚合各任务帧的日志/状态
-  // 形态:可拖迷你球(进度环+状态点+悬停菜单) <-> 毛玻璃完整面板(助手卡片+三页签)
+/* ============================== 悬浮面板(Vue) ============================= */
+  // 只在 top 帧渲染;通过 GM_addValueChangeListener 聚合各任务帧的日志/状态。
+  // 视觉:批注纸(纸白 + 墨 + 红笔),收起为右缘书签。
   function initTopPanel() {
-    GM_addStyle(`
-      #autocx-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;
-        font:13px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:#1f2937}
-      /* ---------- 迷你球 ---------- */
-      #autocx-panel .cx-ball{position:relative;width:46px;height:46px;cursor:grab;user-select:none}
-      #autocx-panel .cx-ball:active{cursor:grabbing}
-      #autocx-panel .cx-ball svg{position:absolute;inset:0;transform:rotate(-90deg)}
-      #autocx-panel .cx-ball .ring-bg{fill:none;stroke:rgba(59,124,255,.18);stroke-width:3.5}
-      #autocx-panel .cx-ball .ring-fg{fill:none;stroke:#3B7CFF;stroke-width:3.5;stroke-linecap:round;
-        stroke-dasharray:125.6;stroke-dashoffset:125.6;transition:stroke-dashoffset .5s}
-      #autocx-panel .cx-ball .core{position:absolute;inset:4px;border-radius:50%;
-        background:linear-gradient(135deg,#3B7CFF,#60A5FA);display:flex;align-items:center;justify-content:center;
-        color:#fff;font-weight:700;font-size:13px;box-shadow:0 2px 10px rgba(59,124,255,.45)}
-      #autocx-panel .cx-ball.off .core{background:#b9c0cc}
-      #autocx-panel .cx-dots{position:absolute;right:-2px;bottom:-2px;display:flex;gap:3px}
-      #autocx-panel .cx-dots i{width:9px;height:9px;border-radius:50%;border:2px solid #fff;display:block}
-      #autocx-panel .cx-dots .d-v{background:#c8cdd6}
-      #autocx-panel .cx-dots .d-v.on{background:#22C55E}
-      #autocx-panel .cx-dots .d-q{background:#c8cdd6}
-      #autocx-panel .cx-dots .d-q.on{background:#8B5CF6}
-      /* ---------- 悬停快捷菜单 ---------- */
-      #autocx-panel .cx-menu{position:absolute;bottom:56px;right:0;width:172px;background:rgba(255,255,255,.96);
-        backdrop-filter:blur(12px);border-radius:12px;box-shadow:0 6px 24px rgba(31,41,55,.18);
-        padding:6px;display:none;border:1px solid rgba(229,231,235,.8)}
-      #autocx-panel .cx-ball:hover .cx-menu{display:block}
-      #autocx-panel .cx-menu .mi{display:flex;align-items:center;justify-content:space-between;gap:8px;
-        padding:8px 10px;border-radius:8px;cursor:pointer;font-size:13px;color:#1f2937}
-      #autocx-panel .cx-menu .mi:hover{background:#F3F6FB}
-      #autocx-panel .cx-menu .mi .st{font-size:11px;color:#9ca3af}
-      #autocx-panel .cx-menu .mi .st.on{color:#22C55E}
-      /* ---------- 完整面板 ---------- */
-      #autocx-panel .cx-box{display:none;width:392px;max-height:66vh;background:rgba(255,255,255,.94);
-        backdrop-filter:blur(14px);border-radius:14px;box-shadow:0 10px 40px rgba(31,41,55,.22);
-        overflow:hidden;flex-direction:column;border:1px solid rgba(229,231,235,.9)}
-      #autocx-panel.open .cx-box{display:flex}
-      #autocx-panel.open .cx-ball{display:none}
-      #autocx-panel .cx-head{display:flex;align-items:center;gap:8px;padding:10px 14px;
-        background:linear-gradient(135deg,#3B7CFF,#60A5FA);color:#fff;cursor:grab;user-select:none}
-      #autocx-panel .cx-head:active{cursor:grabbing}
-      #autocx-panel .cx-head b{flex:1;font-size:14px;letter-spacing:.5px}
-      #autocx-panel .cx-head button{background:none;border:0;color:#fff;cursor:pointer;font-size:15px;opacity:.9}
-      /* ---------- 助手卡片 ---------- */
-      #autocx-panel .cx-cards{display:flex;gap:10px;padding:12px 14px 4px}
-      #autocx-panel .cx-card{flex:1;border-radius:12px;padding:10px 12px;cursor:pointer;position:relative;
-        background:#EEF1F6;color:#6b7280;transition:transform .12s, box-shadow .12s;border:1px solid transparent}
-      #autocx-panel .cx-card:hover{transform:translateY(-1px)}
-      #autocx-panel .cx-card .t{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px}
-      #autocx-panel .cx-card .s{font-size:11px;margin-top:5px;opacity:.85;display:flex;align-items:center;gap:5px}
-      #autocx-panel .cx-card .s i{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
-      #autocx-panel .cx-card .ck{position:absolute;top:8px;right:10px;width:16px;height:16px;border-radius:50%;
-        border:1.5px solid currentColor;display:flex;align-items:center;justify-content:center;font-size:10px;opacity:.5}
-      #autocx-panel .cx-card.on{color:#fff;border:0;box-shadow:0 4px 14px rgba(59,124,255,.3)}
-      #autocx-panel .cx-card.on .ck{opacity:1;border-color:#fff}
-      #autocx-panel .cx-card.on .ck::after{content:"✓"}
-      #autocx-panel .cx-card.video.on{background:linear-gradient(135deg,#3B7CFF,#60A5FA)}
-      #autocx-panel .cx-card.quiz.on{background:linear-gradient(135deg,#8B5CF6,#A78BFA);box-shadow:0 4px 14px rgba(139,92,246,.3)}
-      /* ---------- 页签 ---------- */
-      #autocx-panel .cx-tabs{display:flex;padding:8px 14px 0;gap:4px}
-      #autocx-panel .cx-tabs button{flex:1;padding:6px 0;background:none;border:0;color:#6b7280;cursor:pointer;
-        font-size:13px;border-bottom:2px solid transparent}
-      #autocx-panel .cx-tabs button.active{color:#3B7CFF;border-bottom-color:#3B7CFF;font-weight:600}
-      #autocx-panel .cx-body{padding:10px 14px 12px;overflow-y:auto;min-height:120px}
-      #autocx-panel .cx-page{display:none}
-      #autocx-panel .cx-page.active{display:block}
-      /* ---------- 状态流 ---------- */
-      #autocx-panel .cx-status-item{padding:6px 0;border-bottom:1px solid #EEF1F6;font-size:12px}
-      #autocx-panel .cx-status-item .badge{display:inline-block;padding:1px 7px;border-radius:6px;color:#fff;
-        font-size:11px;margin-right:6px}
-      #autocx-panel .cx-status-item .t{color:#9ca3af;font-size:11px;margin-top:2px}
-      #autocx-panel .badge-video{background:#3B7CFF}
-      #autocx-panel .badge-quiz{background:#8B5CF6}
-      #autocx-panel .badge-knowledge{background:#22C55E}
-      #autocx-panel .badge-advance{background:#F59E0B}
-      #autocx-panel .badge-doc{background:#06B6D4}
-      #autocx-panel .badge-panel,#autocx-panel .badge-bootstrap,#autocx-panel .badge-antithrottle{background:#9ca3af}
-      /* ---------- 日志 ---------- */
-      #autocx-panel .cx-log{height:220px;overflow-y:auto;font:11px Consolas,monospace;color:#4b5563}
-      #autocx-panel .cx-log div{padding:2px 0;border-bottom:1px solid #F1F3F7;word-break:break-all}
-      #autocx-panel .cx-log .warn{color:#d97706}.cx-log .error{color:#dc2626}
-      /* ---------- 设置 ---------- */
-      #autocx-panel .cx-item{display:flex;align-items:center;justify-content:space-between;padding:5px 0;gap:8px}
-      #autocx-panel .cx-item label{flex:1;color:#4b5563;font-size:12.5px}
-      #autocx-panel .cx-item input[type=text],#autocx-panel .cx-item input[type=password],
-      #autocx-panel .cx-item input[type=number],#autocx-panel .cx-item select{width:170px;background:#F5F7FA;
-        border:1px solid #E5E7EB;border-radius:7px;color:#1f2937;padding:4px 8px;font-size:12.5px}
-      #autocx-panel .cx-item input:focus,#autocx-panel .cx-item select:focus{outline:none;border-color:#3B7CFF}
-      #autocx-panel .cx-btn{background:linear-gradient(135deg,#3B7CFF,#60A5FA);border:0;border-radius:8px;
-        color:#fff;padding:6px 14px;cursor:pointer;font-size:12.5px}
-      #autocx-panel .cx-test-result{margin-top:6px;font-size:12px}
-      /* ---------- 关于(仓库入口) ---------- */
-      #autocx-panel .cx-about{margin-top:10px;padding-top:9px;border-top:1px solid #EEF1F6;
-        display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;color:#9ca3af}
-      #autocx-panel .cx-about a{color:#7C8798;text-decoration:none}
-      #autocx-panel .cx-about a:hover{color:#3B7CFF;text-decoration:underline}
-      #autocx-panel .cx-about .cx-about-sep{color:#D5DBE5}
-      /* ---------- 开关 ---------- */
-      #autocx-panel .cx-switch{position:relative;width:36px;height:20px;background:#d1d5db;border-radius:10px;
-        cursor:pointer;transition:background .15s}
-      #autocx-panel .cx-switch.on{background:#3B7CFF}
-      #autocx-panel .cx-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
-        border-radius:50%;background:#fff;transition:left .15s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
-      #autocx-panel .cx-switch.on::after{left:18px}
-      /* ---------- AI 页签 ---------- */
-      #autocx-panel .cx-ai-tip{font-size:11px;color:#9ca3af;line-height:1.6;margin:2px 0 8px}
-      #autocx-panel .cx-ai-row{display:flex;align-items:center;justify-content:space-between;gap:8px;
-        padding:5px 0;border-bottom:1px solid #EEF1F6;font-size:12px;color:#4b5563}
-      #autocx-panel .cx-ai-row b{color:#1f2937;font-size:12px;font-weight:600;white-space:nowrap}
-    `);
-
+    const V = (typeof window !== 'undefined' && window.Vue) ? window.Vue : (typeof Vue !== 'undefined' ? Vue : null);
+    const A = (typeof window !== 'undefined' && window.antd) ? window.antd : (typeof antd !== 'undefined' ? antd : null);
+    if (!V || !V.createApp) {
+      log.error('panel', 'Vue 未加载，悬浮面板不可用（业务逻辑继续）');
+      return;
+    }
+    if (!A) {
+      log.error('panel', 'Ant Design Vue 未加载，悬浮面板不可用（业务逻辑继续）');
+      return;
+    }
+    GM_addStyle(PANEL_CSS);
     elmGetter.get('body', 15000).then((body) => {
-      const RING_LEN = 125.6; // 2πr (r=20) 进度环周长
-      const $panel = $(`
-        <div id="autocx-panel">
-          <div class="cx-ball" title="AutoCX(拖动移动,点击展开)">
-            <svg viewBox="0 0 46 46"><circle class="ring-bg" cx="23" cy="23" r="20"/><circle class="ring-fg" cx="23" cy="23" r="20"/></svg>
-            <div class="core">CX</div>
-            <div class="cx-dots"><i class="d-v" title="看课助手"></i><i class="d-q" title="答题助手"></i></div>
-            <div class="cx-menu">
-              <div class="mi" data-act="open">展开窗口 <span class="st">›</span></div>
-              <div class="mi" data-act="toggle-video">看课助手 <span class="st st-v"></span></div>
-              <div class="mi" data-act="toggle-quiz">答题助手 <span class="st st-q"></span></div>
-              <div class="mi" data-act="ai">答题记录 <span class="st">›</span></div>
-              <div class="mi" data-act="toggle-main">总开关 <span class="st st-m"></span></div>
-            </div>
-          </div>
-          <div class="cx-box">
-            <div class="cx-head">
-              <b>AutoCX 学习通助手</b>
-              <span class="cx-enabled cx-switch" title="总开关"></span>
-              <button class="cx-close" title="收起">—</button>
-            </div>
-            <div class="cx-cards">
-              <div class="cx-card video" data-assist="assist.video">
-                <div class="t">▶ 看课助手</div>
-                <div class="s"><i></i><span class="st-v-txt">待命</span></div>
-                <div class="ck"></div>
-              </div>
-              <div class="cx-card quiz" data-assist="assist.quiz">
-                <div class="t">✎ 答题助手</div>
-                <div class="s"><i></i><span class="st-q-txt">待命</span></div>
-                <div class="ck"></div>
-              </div>
-            </div>
-            <div class="cx-tabs">
-              <button data-tab="status" class="active">状态</button>
-              <button data-tab="log">日志</button>
-              <button data-tab="ai">AI</button>
-              <button data-tab="settings">设置</button>
-            </div>
-            <div class="cx-body">
-              <div class="cx-page active" data-page="status"><div class="cx-status-list"><i style="color:#9ca3af">等待任务帧上报…</i></div></div>
-              <div class="cx-page" data-page="log"><div class="cx-log"></div></div>
-              <div class="cx-page" data-page="ai">
-                <div class="cx-ai-tip">答题时,脚本发出的请求、模型思考与回答都会记进「AI 作答记录」窗口。</div>
-                <div class="cx-item"><button class="cx-btn cx-ai-open">打开作答记录窗口</button></div>
-                <div class="cx-ai-list"></div>
-              </div>
-              <div class="cx-page" data-page="settings">
-                <div class="cx-item"><label>LLM Base URL</label><input type="text" data-cfg="llm.base_url"></div>
-                <div class="cx-item"><label>LLM API Key</label><input type="password" data-cfg="llm.api_key"></div>
-                <div class="cx-item"><label>LLM 模型</label><input type="text" data-cfg="llm.model"></div>
-                <div class="cx-item"><label>思考强度(推理模型提速)</label>
-                  <select data-cfg="llm.effort">
-                    <option value="low">low (推荐,快)</option>
-                    <option value="medium">medium</option>
-                    <option value="high">high</option>
-                    <option value="">不发送该参数</option>
-                  </select></div>
-                <div class="cx-item"><label>停滞超时(秒,慢模型调大)</label><input type="number" min="15" max="600" data-cfg="llm.timeout"></div>
-                <div class="cx-item"><label>流式接收(思考过程逐字显示)</label><input type="checkbox" data-cfg="llm.stream"></div>
-                <div class="cx-item"><label>视频倍速 (1-16)</label><input type="number" min="1" max="16" data-cfg="video.speed"></div>
-                <div class="cx-item"><label>视频静音</label><input type="checkbox" data-cfg="video.mute"></div>
-                <div class="cx-item"><label>自动勾选答案</label><input type="checkbox" data-cfg="quiz.auto_fill"></div>
-                <div class="cx-item"><label>自动提交(全答完才生效)</label><input type="checkbox" data-cfg="quiz.auto_submit"></div>
-                <div class="cx-item"><label>两答一致性校验(防手滑)</label><input type="checkbox" data-cfg="quiz.double_check"></div>
-                <div class="cx-item"><label>作业自动提交(默认关,作业常只能交一次)</label><input type="checkbox" data-cfg="quiz.auto_submit_work"></div>
-                <div class="cx-item"><label>视觉兜底(未解码字交给多模态模型)</label><input type="checkbox" data-cfg="llm.vision"></div>
-                <div class="cx-item"><label>参考库地址(留空=用内联一级字库)</label><input type="text" data-cfg="font.refdb_url" placeholder="https://…/refdb-24.js"></div>
-                <div class="cx-item"><button class="cx-btn cx-test-vision">测试多模态(发一张字形图)</button></div>
-                <div class="cx-test-result cx-vision-result"></div>
-                <div class="cx-item"><label>翻页间隔基数(秒)</label><input type="number" min="1" max="10" data-cfg="doc.interval"></div>
-                <div class="cx-item"><label>调试日志</label><input type="checkbox" data-cfg="debug"></div>
-                <div class="cx-item"><button class="cx-btn cx-test-llm">测试 LLM 连接</button></div>
-                <div class="cx-test-result"></div>
-                <div class="cx-about">
-                  <span class="cx-about-v"></span>
-                  <span class="cx-about-sep">·</span>
-                  <a href="${REPO.github}" target="_blank" rel="noopener noreferrer">GitHub</a>
-                  <span class="cx-about-sep">·</span>
-                  <a href="${REPO.gitee}" target="_blank" rel="noopener noreferrer">Gitee</a>
-                  <span class="cx-about-sep">·</span>
-                  <a href="${REPO.issues}" target="_blank" rel="noopener noreferrer">反馈</a>
-                  <span class="cx-about-sep">·</span>
-                  <span>MIT</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>`);
-      $(body).append($panel);
-      $panel.find('.cx-about-v').text('AutoCX v' + VERSION);
-
-      // ---- 助手开关渲染 ----
-      const assistOn = (k) => config.get(k) !== false;
-      const renderAssist = () => {
-        $panel.find('.cx-card.video').toggleClass('on', assistOn('assist.video'));
-        $panel.find('.cx-card.quiz').toggleClass('on', assistOn('assist.quiz'));
-        $panel.find('.cx-dots .d-v').toggleClass('on', assistOn('assist.video'));
-        $panel.find('.cx-dots .d-q').toggleClass('on', assistOn('assist.quiz'));
-        $panel.find('.cx-menu .st-v').text(assistOn('assist.video') ? '已开启' : '已关闭').toggleClass('on', assistOn('assist.video'));
-        $panel.find('.cx-menu .st-q').text(assistOn('assist.quiz') ? '已开启' : '已关闭').toggleClass('on', assistOn('assist.quiz'));
-        $panel.find('.cx-menu .st-m').text(isEnabled() ? '已开启' : '已关闭').toggleClass('on', isEnabled());
-        $panel.find('.cx-ball').toggleClass('off', !isEnabled());
-      };
-      renderAssist();
-      const toggleAssist = (k, name) => {
-        config.set(k, !assistOn(k));
-        renderAssist();
-        log.info('panel', `${name}: ${assistOn(k) ? '开' : '关'}`);
-      };
-      $panel.find('.cx-card.video').on('click', () => toggleAssist('assist.video', '看课助手'));
-      $panel.find('.cx-card.quiz').on('click', () => toggleAssist('assist.quiz', '答题助手'));
-
-      // ---- 拖动与位置约束:迷你球和展开窗口都可拖,且始终钳制在可视区内 ----
-      const clampIntoView = () => {
-        const rect = $panel.get(0).getBoundingClientRect();
-        const maxLeft = Math.max(0, window.innerWidth - rect.width - 8);
-        const maxTop = Math.max(0, window.innerHeight - rect.height - 8);
-        const left = Math.min(Math.max(0, rect.left), maxLeft);
-        const top = Math.min(Math.max(0, rect.top), maxTop);
-        $panel.css({ left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
-      };
-      const makeDraggable = (handle) => {
-        let moved = false;
-        handle.on('mousedown', (e0) => {
-          if (e0.target.closest('.cx-menu,button,.cx-switch')) return; // 控件不触发拖动
-          const off = $panel.offset();
-          const dx = e0.clientX - off.left, dy = e0.clientY - off.top;
-          moved = false;
-          const onMove = (e) => {
-            moved = true;
-            const rect = $panel.get(0).getBoundingClientRect();
-            const left = Math.min(Math.max(0, e.clientX - dx), Math.max(0, window.innerWidth - rect.width - 8));
-            const top = Math.min(Math.max(0, e.clientY - dy), Math.max(0, window.innerHeight - rect.height - 8));
-            $panel.css({ left: left + 'px', top: top + 'px', right: 'auto', bottom: 'auto' });
-          };
-          const onUp = () => {
-            $(document).off('mousemove', onMove).off('mouseup', onUp);
-            if (moved) {
-              const p = $panel.offset();
-              config.set('autocx.ballPos', { left: Math.round(p.left), top: Math.round(p.top) });
-            }
-          };
-          $(document).on('mousemove', onMove).on('mouseup', onUp);
-          e0.preventDefault();
-        });
-        return () => moved;
-      };
-
-      const $ball = $panel.find('.cx-ball');
-      const savedPos = config.get('autocx.ballPos');
-      if (savedPos && savedPos.left != null) {
-        $panel.css({ left: savedPos.left + 'px', top: savedPos.top + 'px', right: 'auto', bottom: 'auto' });
-        // 加载即钳制:窗口缩放/上次拖到边缘都可能出屏
-        setTimeout(clampIntoView, 100);
-      }
-      const ballMoved = makeDraggable($ball);
-      makeDraggable($panel.find('.cx-head')); // 展开后拖头部移动窗口
-
-      const openPanel = () => { $panel.addClass('open'); setTimeout(clampIntoView, 50); };
-      const openAI = () => {
-        try { AIW.ensure().open(); } catch (e) { log.error('panel', '打开作答记录失败: ' + e.message); }
-      };
-      $ball.on('click', (e) => {
-        if (ballMoved() || e.target.closest('.cx-menu')) return;
-        openPanel();
-      });
-      $panel.find('.cx-menu .mi').on('click', function (e) {
-        e.stopPropagation();
-        const act = $(this).data('act');
-        if (act === 'open') openPanel();
-        else if (act === 'ai') openAI();
-        else if (act === 'toggle-video') toggleAssist('assist.video', '看课助手');
-        else if (act === 'toggle-quiz') toggleAssist('assist.quiz', '答题助手');
-        else if (act === 'toggle-main') { config.set('autocx.enabled', !isEnabled()); renderAssist(); renderSwitch(); }
-      });
-      $panel.find('.cx-close').on('click', () => $panel.removeClass('open'));
-      // 窗口尺寸变化时重新钳制,避免面板被挤出屏幕
-      window.addEventListener('resize', clampIntoView);
-
-      // ---- 总开关 ----
-      const $sw = $panel.find('.cx-enabled');
-      const renderSwitch = () => { $sw.toggleClass('on', isEnabled()); $panel.find('.cx-ball').toggleClass('off', !isEnabled()); };
-      renderSwitch();
-      $sw.on('click', () => {
-        config.set('autocx.enabled', !isEnabled());
-        renderSwitch();
-        renderAssist();
-        log.info('panel', `总开关: ${isEnabled() ? '开' : '关'}`);
-      });
-
-      // ---- 页签 ----
-      $panel.find('.cx-tabs button').on('click', function () {
-        $panel.find('.cx-tabs button').removeClass('active');
-        $(this).addClass('active');
-        $panel.find('.cx-page').removeClass('active');
-        $panel.find(`.cx-page[data-page="${$(this).data('tab')}"]`).addClass('active');
-      });
-
-      // ---- 设置绑定 ----
-      $panel.find('[data-cfg]').each(function () {
-        const key = $(this).data('cfg');
-        const isCheckbox = this.type === 'checkbox';
-        if (isCheckbox) this.checked = !!config.get(key); else this.value = config.get(key);
-        $(this).on('change', () => {
-          config.set(key, isCheckbox ? this.checked : (this.type === 'number' ? Number(this.value) : this.value));
-          log.debug('panel', `配置更新 ${key}`);
-        });
-      });
-
-      // ---- AI 页签:实时摘要 + 打开记录窗口 ----
-      const $aiList = $panel.find('.cx-ai-list');
-      const AI_STATE = {
-        off: '自动提交 关', wait: '自动提交 开 · 等待答完', ready: '自动提交 开 · 即将提交',
-        done: '已提交', blocked: '未提交(有未答题)', captcha: '未提交(验证码转人工)',
-      };
-      const renderAIPanel = () => {
-        let m = null;
-        try { m = GM_getValue(AI_PING) || null; } catch (_) { m = null; }
-        if (!m || !m.count) {
-          $aiList.html('<i style="color:#9ca3af">还没有记录。测验页开始答题后,这里会显示进度。</i>');
-          return;
-        }
-        const bad = Number(m.failed) || 0;
-        $aiList.html(
-          '<div class="cx-ai-row"><span>' + escHtml(m.title || '章节测验') + '</span><b>'
-            + (Number(m.answered) || 0) + ' / ' + m.count + '</b></div>'
-          + '<div class="cx-ai-row"><span>失败</span><b style="color:' + (bad ? '#dc2626' : '#1f2937') + '">'
-            + bad + ' 题</b></div>'
-          + '<div class="cx-ai-row"><span>提交</span><b>' + (AI_STATE[m.submitState] || '未知') + '</b></div>'
-          + '<div class="cx-ai-row"><span>' + escHtml(m.model || '') + '</span><b>' + escHtml(m.source || '') + '</b></div>'
-        );
-      };
-      renderAIPanel();
-      $panel.find('.cx-ai-open').on('click', openAI);
-      GM_addValueChangeListener(AI_PING, (_k, _o, nv, remote) => { if (remote && nv) renderAIPanel(); });
-
-      // ---- LLM 测试 ----
-      $panel.find('.cx-test-llm').on('click', function () {
-        const $r = $panel.find('.cx-test-result').first().css('color', '#6b7280').text('测试中…');
-        $(this).prop('disabled', true);
-        llm.test()
-          .then((msg) => $r.css('color', '#16a34a').text('✅ ' + msg))
-          .catch((e) => $r.css('color', '#dc2626').text('❌ ' + e.message))
-          .finally(() => $(this).prop('disabled', false));
-      });
-
-      $panel.find('.cx-test-vision').on('click', function () {
-        const $r = $panel.find('.cx-vision-result').css('color', '#6b7280').text('测试中…');
-        $(this).prop('disabled', true);
-        visionSelfCheck()
-          .then((msg) => $r.css('color', '#16a34a').text('✅ ' + msg))
-          .catch((e) => $r.css('color', '#dc2626').text('❌ ' + e.message))
-          .finally(() => $(this).prop('disabled', false));
-      });
-
-      // ---- 进度环 ----
-      const setRing = (pct) => {
-        const p = Math.min(100, Math.max(0, pct));
-        $panel.find('.ring-fg').css('stroke-dashoffset', RING_LEN * (1 - p / 100));
-      };
-
-      // ---- 助手卡片实时状态 ----
-      const setCardStatus = (assist, text) => {
-        $panel.find(assist === 'assist.video' ? '.st-v-txt' : '.st-q-txt').text(text);
-      };
-
-      // ---- 跨帧日志/状态聚合 ----
-      const fmt = (ts) => new Date(ts).toTimeString().slice(0, 8);
-      GM_addValueChangeListener(LOG_KEY, (_k, _o, nv, remote) => {
-        if (!remote || !nv) return;
-        const $log = $panel.find('.cx-log');
-        $log.append(`<div class="${nv.level}">${fmt(nv.ts)} [${nv.module}] ${nv.msg}</div>`);
-        const items = $log.children();
-        if (items.length > 200) items.slice(0, items.length - 200).remove();
-        $log.scrollTop($log[0].scrollHeight);
-      });
-      GM_addValueChangeListener(STATUS_KEY, (_k, _o, nv, remote) => {
-        if (!remote || !nv) return;
-        const $list = $panel.find('.cx-status-list');
-        $list.find('i').remove();
-        $list.prepend(`<div class="cx-status-item"><span class="badge badge-${nv.module}">${nv.module}</span>${nv.state} ${nv.detail || ''}<div class="t">${fmt(nv.ts)} ${nv.frame}</div></div>`);
-        const items = $list.children();
-        if (items.length > 20) items.slice(20).remove();
-        // 驱动卡片状态与进度环
-        const detail = nv.detail || '';
-        if (nv.module === 'video' || nv.module === 'doc' || nv.module === 'knowledge') {
-          setCardStatus('assist.video', detail || nv.state);
-        }
-        if (nv.module === 'quiz') {
-          setCardStatus('assist.quiz', detail || nv.state);
-        }
-        if (nv.module === 'video') {
-          const m = detail.match(/(\d+)%/);
-          if (nv.state === 'playing' && m) setRing(Number(m[1]));
-          if (nv.state === 'done') setRing(100);
-        }
-      });
-
+      const mount = document.createElement('div');
+      mount.id = 'autocx-vue-root';
+      (body || document.body).appendChild(mount);
+      try { if (typeof unsafeWindow !== 'undefined' && !unsafeWindow.Vue) unsafeWindow.Vue = V; } catch (_) { /* 忽略 */ }
+      const app = V.createApp(createPanelRoot(V));
+      app.use(A);
+      app.mount(mount);
       log.info('panel', '悬浮面板已加载');
-    }).catch((e) => log.error('panel', '等待 body 超时: ' + e));
+    }).catch((e) => log.error('panel', '等待 body 超时: ' + (e && e.stack ? e.stack : e.message)));
+  }
+
+  const PANEL_CSS = `
+    #autocx-vue-root{position:fixed;inset:0;z-index:2147483646;pointer-events:none;
+      font:13px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;color:#1E2A2F}
+    #autocx-vue-root *{box-sizing:border-box}
+    #autocx-vue-root .acx-ui{pointer-events:none}
+    #autocx-vue-root .acx-ui > *{pointer-events:auto}
+    #autocx-vue-root button{font:inherit}
+    /* ---------- 纸面 ---------- */
+    #autocx-vue-root .acx-panel{position:fixed;right:16px;bottom:16px;width:400px;height:610px;max-height:calc(100vh - 32px);
+      background-color:#FAFAF5;
+      background-image:linear-gradient(rgba(30,42,47,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(30,42,47,.03) 1px,transparent 1px);
+      background-size:20px 20px;border:1px solid rgba(30,42,47,.24);box-shadow:0 20px 48px rgba(30,42,47,.22);
+      clip-path:polygon(0 0,calc(100% - 22px) 0,100% 22px,100% 100%,0 100%);
+      display:flex;flex-direction:column;color:#1E2A2F}
+    #autocx-vue-root .acx-panel::after{content:"";position:absolute;top:0;right:0;width:22px;height:22px;
+      background:linear-gradient(225deg,#D9DCD2 50%,#F1F2EB 50%);border-left:1px solid rgba(30,42,47,.14);border-bottom:1px solid rgba(30,42,47,.14)}
+    #autocx-vue-root .acx-margin-rule{position:absolute;left:22px;top:0;bottom:0;width:1px;background:rgba(194,69,58,.32);pointer-events:none}
+    #autocx-vue-root .acx-head{display:flex;align-items:center;gap:10px;padding:17px 20px 12px 34px;cursor:grab;user-select:none}
+    #autocx-vue-root .acx-head:active{cursor:grabbing}
+    #autocx-vue-root .acx-seal{width:32px;height:32px;background:#C2453A;color:#FFF9F0;display:flex;align-items:center;justify-content:center;
+      font:700 12px/1 Georgia,"Songti SC",serif;letter-spacing:.06em;transform:rotate(-2.5deg);
+      box-shadow:inset 0 0 0 2px rgba(255,255,255,.24);flex:none}
+    #autocx-vue-root .acx-title{display:flex;flex-direction:column;line-height:1.15}
+    #autocx-vue-root .acx-title strong{font:600 19px/1.1 Georgia,"Songti SC","SimSun",serif;letter-spacing:-.01em}
+    #autocx-vue-root .acx-title span{font-size:10px;color:#7C8688;margin-top:3px;letter-spacing:.12em}
+    #autocx-vue-root .acx-switch{margin-left:auto;width:34px;height:18px;border:1px solid #1E2A2F;background:#FAFAF5;position:relative;cursor:pointer;padding:0}
+    #autocx-vue-root .acx-switch i{position:absolute;top:2px;right:2px;width:12px;height:12px;background:#C2453A;transition:.15s}
+    #autocx-vue-root .acx-switch.off i{right:auto;left:2px;background:#B9C0BB}
+    #autocx-vue-root .acx-min{width:22px;height:20px;border:0;background:transparent;color:#7C8688;font-size:15px;line-height:1;cursor:pointer;padding:0;margin-left:2px}
+    #autocx-vue-root .acx-min:hover{color:#C2453A}
+    #autocx-vue-root .acx-head-rule{margin:0 18px 0 34px;border-top:2px solid #1E2A2F;border-bottom:1px solid rgba(194,69,58,.45);height:4px}
+    #autocx-vue-root .acx-ledger{padding:12px 22px 9px 34px;display:flex;flex-direction:column;gap:2px}
+    #autocx-vue-root .acx-ledger-row{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px;cursor:pointer;user-select:none}
+    #autocx-vue-root .acx-ledger-row + .acx-ledger-row{border-top:1px dotted rgba(30,42,47,.18)}
+    #autocx-vue-root .acx-ledger-row .glyph{width:15px;color:#C2453A;font-size:11px}
+    #autocx-vue-root .acx-ledger-row b{font-weight:600}
+    #autocx-vue-root .acx-ledger-row .leader{flex:1;border-bottom:1px dotted rgba(30,42,47,.22);margin:0 3px 3px}
+    #autocx-vue-root .acx-ledger-row em{font-style:normal;color:#5C6B6E;font-size:11px;font-variant-numeric:tabular-nums}
+    #autocx-vue-root .acx-ledger-row em.live{color:#C2453A}
+    #autocx-vue-root .acx-ledger-row em.off{color:#A2AAA8}
+    /* ---------- 页签 ---------- */
+    #autocx-vue-root .acx-tabs{display:flex;align-items:flex-end;gap:3px;padding:10px 18px 0 34px}
+    #autocx-vue-root .acx-tab{font-size:11.5px;padding:5px 11px 6px;background:#EFF0E8;color:#5F6B6D;border:1px solid rgba(30,42,47,.16);border-bottom:0;
+      border-radius:3px 3px 0 0;cursor:pointer}
+    #autocx-vue-root .acx-tab.on{background:#FAFAF5;color:#C2453A;border-top:2px solid #C2453A;font-weight:600;padding-top:4px}
+    /* ---------- 正文 ---------- */
+    #autocx-vue-root .acx-body{flex:1;border-top:1px solid rgba(30,42,47,.18);margin:0 18px 0 34px;padding:11px 4px 10px 0;overflow:auto;scrollbar-width:thin}
+    #autocx-vue-root .acx-empty{color:#8B9495;font-size:11px;line-height:1.8;padding:6px 0}
+    #autocx-vue-root .acx-status-item{padding:6px 0;border-bottom:1px solid rgba(30,42,47,.07);font-size:10.5px;color:#334246}
+    #autocx-vue-root .acx-status-item .badge{display:inline-block;padding:1px 6px;border-radius:4px;color:#fff;font-size:9.5px;margin-right:6px;background:#8B9495}
+    #autocx-vue-root .acx-status-item .badge.video{background:#2E5A75}
+    #autocx-vue-root .acx-status-item .badge.quiz{background:#8B5CF6}
+    #autocx-vue-root .acx-status-item .badge.knowledge{background:#2F6B4E}
+    #autocx-vue-root .acx-status-item .badge.advance{background:#B7791F}
+    #autocx-vue-root .acx-status-item .badge.doc{background:#2C7A7B}
+    #autocx-vue-root .acx-status-item .t{color:#8B9495;font-size:9.5px;margin-top:2px}
+    #autocx-vue-root .acx-log{font-size:10px;color:#4C5A5E}
+    #autocx-vue-root .acx-log div{padding:3px 0;border-bottom:1px solid rgba(30,42,47,.06);word-break:break-all}
+    #autocx-vue-root .acx-log .warn{color:#A05A34}
+    #autocx-vue-root .acx-log .error{color:#C2453A}
+    /* ---------- 设置 ---------- */
+    #autocx-vue-root .acx-set-group{padding:2px 0 8px}
+    #autocx-vue-root .acx-set-group + .acx-set-group{border-top:1px dotted rgba(30,42,47,.18);padding-top:10px}
+    #autocx-vue-root .acx-set-group h4{margin:0 0 8px;font:600 10px/1.2 -apple-system,"PingFang SC",sans-serif;color:#8B9495;letter-spacing:.12em}
+    #autocx-vue-root .acx-field{margin-bottom:9px}
+    #autocx-vue-root .acx-field label{display:flex;align-items:baseline;justify-content:space-between;font-size:10.5px;color:#4C5A5E;margin-bottom:3px}
+    #autocx-vue-root .acx-field label em{font-style:normal;font-size:9.5px;color:#A0A8A7}
+    #autocx-vue-root .acx-field input,#autocx-vue-root .acx-field .ant-input,#autocx-vue-root .acx-field .ant-select-selector{
+      width:100%;border:0!important;border-bottom:1px solid rgba(30,42,47,.3)!important;border-radius:0!important;padding:3px 2px 4px!important;
+      font-size:11px!important;background:transparent!important;box-shadow:none!important;color:#1E2A2F!important;outline:none!important}
+    #autocx-vue-root .acx-field input:focus,#autocx-vue-root .acx-field .ant-input:focus{border-bottom-color:#C2453A!important}
+    #autocx-vue-root .acx-field .ant-select{width:100%;font-size:11px}
+    #autocx-vue-root .acx-field .ant-select-selection-item{font-size:11px;line-height:20px}
+    #autocx-vue-root .acx-field .ant-select-arrow{color:#7C8688;font-size:9px}
+    #autocx-vue-root .acx-toggle{width:32px;height:16px;border:1px solid #1E2A2F;background:#FAFAF5;position:relative;cursor:pointer;padding:0;flex:none}
+    #autocx-vue-root .acx-toggle i{position:absolute;top:2px;right:2px;width:10px;height:10px;background:#C2453A}
+    #autocx-vue-root .acx-toggle.off i{right:auto;left:2px;background:#B9C0BB}
+    #autocx-vue-root .acx-inline{display:flex;align-items:center;gap:8px;font-size:10.5px;color:#4C5A5E;margin:6px 0 9px;cursor:pointer;user-select:none}
+    #autocx-vue-root .acx-inline .acx-toggle{margin-left:auto}
+    #autocx-vue-root .acx-note{font-size:9.5px;color:#8B9495;line-height:1.5;margin-top:2px}
+    #autocx-vue-root .acx-btn{background:#C2453A;color:#FFF9F0;border:0;padding:7px 12px;font-size:11px;cursor:pointer}
+    #autocx-vue-root .acx-btn:hover{opacity:.88}
+    #autocx-vue-root .acx-btn[disabled]{opacity:.5;cursor:default}
+    #autocx-vue-root .acx-test{margin-top:6px;font-size:10px;line-height:1.5;color:#5C6B6E}
+    /* ---------- 页脚 ---------- */
+    #autocx-vue-root .acx-foot{display:flex;align-items:center;gap:10px;padding:8px 20px 9px 34px;font-size:9.5px;color:#8B9495;border-top:1px solid rgba(30,42,47,.09)}
+    #autocx-vue-root .acx-foot .right{margin-left:auto;display:flex;gap:8px}
+    #autocx-vue-root .acx-foot a{color:#8B9495;text-decoration:none}
+    #autocx-vue-root .acx-foot a:hover{color:#C2453A}
+    /* ---------- 书签 ---------- */
+    #autocx-vue-root .acx-bookmark{position:fixed;right:0;top:31%;width:28px;height:124px;background:#FAFAF5;border:1px solid rgba(30,42,47,.25);border-right:0;
+      box-shadow:0 8px 22px rgba(30,42,47,.18);display:flex;flex-direction:column;align-items:center;padding:9px 0 8px;cursor:pointer;
+      font:600 9px/1.2 Georgia,"Songti SC",serif;color:#1E2A2F;letter-spacing:.08em}
+    #autocx-vue-root .acx-bookmark::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:#C2453A}
+    #autocx-vue-root .acx-bm-text{writing-mode:vertical-rl;text-orientation:mixed;letter-spacing:.16em}
+    #autocx-vue-root .acx-bm-bar{width:3px;flex:1;background:rgba(30,42,47,.1);margin:7px 0;position:relative}
+    #autocx-vue-root .acx-bm-bar i{position:absolute;left:0;bottom:0;width:100%;background:#C2453A;transition:height .4s}
+    #autocx-vue-root .acx-bm-pct{margin-top:auto;color:#C2453A;font:600 11px/1 "Bahnschrift",sans-serif}
+    #autocx-vue-root .acx-bm-menu{display:none;position:absolute;right:34px;top:0;width:248px;background:#FAFAF5;border:1px solid rgba(30,42,47,.24);box-shadow:0 14px 32px rgba(30,42,47,.18);padding:6px}
+    #autocx-vue-root .acx-bookmark:hover .acx-bm-menu{display:block}
+    #autocx-vue-root .acx-bm-menu .mi{display:flex;align-items:center;justify-content:space-between;padding:9px 10px;font-size:11px;color:#334246;border-bottom:1px dotted rgba(30,42,47,.14);cursor:pointer}
+    #autocx-vue-root .acx-bm-menu .mi:last-child{border-bottom:0}
+    #autocx-vue-root .acx-bm-menu .mi:hover{background:#F2F3EA}
+    #autocx-vue-root .acx-bm-menu .mi b{font-weight:500;color:#C2453A;font-size:10px}
+    #autocx-vue-root .acx-bm-menu .mi .st{color:#8B9495;font-size:10px}
+    /* ---------- AntD 下拉层 ---------- */
+    .ant-select-dropdown{z-index:2147483647!important;font-size:11px}
+    .ant-select-item{font-size:11px!important}
+    @media (prefers-reduced-motion:reduce){#autocx-vue-root .acx-bm-bar i{transition:none}}
+  `;
+
+  const PANEL_TEMPLATE = `
+    <a-config-provider :theme="antdTheme">
+      <div class="acx-ui">
+        <div v-if="!panelOpen" class="acx-bookmark" @click="panelOpen = true" title="展开 AutoCX">
+          <span class="acx-bm-text">AutoCX</span>
+          <span class="acx-bm-bar"><i :style="{ height: progress + '%' }"></i></span>
+          <span class="acx-bm-pct">{{ progress || '—' }}</span>
+          <div class="acx-bm-menu" @click.stop>
+            <div class="mi" @click="panelOpen = true"><span>展开面板</span><span class="st">›</span></div>
+            <div class="mi" @click="toggleAssist('video')"><span>看课助手</span><b>{{ assistVideo ? '已开启' : '已关闭' }}</b></div>
+            <div class="mi" @click="toggleAssist('quiz')"><span>答题助手</span><b>{{ assistQuiz ? '已开启' : '已关闭' }}</b></div>
+            <div class="mi" @click="openAI"><span>答题记录</span><span class="st">›</span></div>
+            <div class="mi" @click="toggleMain"><span>总开关</span><b>{{ enabled ? '已开启' : '已关闭' }}</b></div>
+          </div>
+        </div>
+
+        <section v-if="panelOpen" class="acx-panel" :style="panelStyle" ref="panelEl">
+          <div class="acx-margin-rule"></div>
+          <header class="acx-head" @mousedown="startDrag">
+            <div class="acx-seal">CX</div>
+            <div class="acx-title"><strong>AutoCX</strong><span>学习通助手</span></div>
+            <button class="acx-switch" :class="{ off: !enabled }" @click="toggleMain" :title="enabled ? '总开关：开' : '总开关：关'"><i></i></button>
+            <button class="acx-min" @click="panelOpen = false" title="收起为书签">—</button>
+          </header>
+          <div class="acx-head-rule"></div>
+          <div class="acx-ledger">
+            <div class="acx-ledger-row" @click="toggleAssist('video')">
+              <span class="glyph">▶</span><b>看课助手</b><span class="leader"></span>
+              <em :class="assistVideo ? 'live' : 'off'">{{ assistVideo ? videoState : '已关闭' }}</em>
+            </div>
+            <div class="acx-ledger-row" @click="toggleAssist('quiz')">
+              <span class="glyph">✎</span><b>答题助手</b><span class="leader"></span>
+              <em :class="assistQuiz ? '' : 'off'">{{ assistQuiz ? quizState : '已关闭' }}</em>
+            </div>
+          </div>
+          <nav class="acx-tabs">
+            <button v-for="t in tabs" :key="t.key" class="acx-tab" :class="{ on: activeTab === t.key }" @click="activeTab = t.key">{{ t.label }}</button>
+          </nav>
+          <div class="acx-body" ref="bodyEl">
+            <template v-if="activeTab === 'status'">
+              <div v-if="!statuses.length" class="acx-empty">等待任务帧上报…</div>
+              <div v-for="(s, i) in statuses" :key="i" class="acx-status-item">
+                <span class="badge" :class="s.module">{{ s.module }}</span>{{ s.state }} {{ s.detail }}
+                <div class="t">{{ fmtTime(s.ts) }} · {{ s.frame }}</div>
+              </div>
+            </template>
+
+            <template v-else-if="activeTab === 'log'">
+              <div v-if="!logs.length" class="acx-empty">还没有日志。任务帧跑起来后会在这里汇总。</div>
+              <div class="acx-log" ref="logEl">
+                <div v-for="(l, i) in logs" :key="i" :class="l.level">{{ l.time }} [{{ l.module }}] {{ l.msg }}</div>
+              </div>
+            </template>
+
+            <template v-else-if="activeTab === 'ai'">
+              <div v-if="aiPing" class="acx-set-group">
+                <div class="acx-inline" style="cursor:default"><span>{{ aiPing.title || '章节测验' }}</span><b style="margin-left:auto;color:#1E2A2F">{{ aiPing.answered || 0 }} / {{ aiPing.count || 0 }}</b></div>
+                <div class="acx-inline" style="cursor:default"><span>失败</span><b style="margin-left:auto;color:#C2453A">{{ aiPing.failed || 0 }} 题</b></div>
+                <div class="acx-inline" style="cursor:default"><span>提交</span><b style="margin-left:auto;color:#1E2A2F">{{ aiStateText(aiPing.submitState) }}</b></div>
+                <div class="acx-inline" style="cursor:default"><span>{{ aiPing.model || '' }}</span><b style="margin-left:auto;color:#2E5A75">{{ aiPing.source || '' }}</b></div>
+              </div>
+              <div v-else class="acx-empty">还没有记录。测验页开始答题后，这里会显示进度。</div>
+              <button class="acx-btn" style="margin-top:8px" @click="openAI">打开作答记录窗口</button>
+            </template>
+
+            <template v-else>
+              <div class="acx-set-group">
+                <h4>模型接口</h4>
+                <div class="acx-field"><label>LLM Base URL</label><a-input v-model:value="settings['llm.base_url']" @change="saveCfg('llm.base_url')"></a-input></div>
+                <div class="acx-field"><label>API Key <em>仅本机保存</em></label><a-input type="password" v-model:value="settings['llm.api_key']" @change="saveCfg('llm.api_key')"></a-input></div>
+                <div class="acx-field"><label>模型</label><a-input v-model:value="settings['llm.model']" @change="saveCfg('llm.model')"></a-input></div>
+                <div class="acx-field"><label>思考强度</label>
+                  <div style="display:flex;gap:2px;flex-wrap:wrap">
+                    <button v-for="e in effortOptions" :key="e.value" class="acx-tab" :class="{ on: settings['llm.effort'] === e.value }" style="font-size:10px;padding:3px 9px;border:1px solid rgba(30,42,47,.24);border-radius:0" @click="setEffort(e.value)">{{ e.label }}</button>
+                  </div>
+                </div>
+                <div class="acx-field"><label>停滞超时（秒）</label><input type="number" min="15" max="600" v-model.number="settings['llm.timeout']" @change="saveCfg('llm.timeout')"></div>
+                <div class="acx-inline" @click="toggleCfg('llm.stream')">流式接收<span class="acx-toggle" :class="{ off: !settings['llm.stream'] }"><i></i></span></div>
+              </div>
+              <div class="acx-set-group">
+                <h4>看课</h4>
+                <div class="acx-field"><label>视频倍速</label><input type="number" min="1" max="16" v-model.number="settings['video.speed']" @change="saveCfg('video.speed')"></div>
+                <div class="acx-inline" @click="toggleCfg('video.mute')">静音<span class="acx-toggle" :class="{ off: !settings['video.mute'] }"><i></i></span></div>
+                <div class="acx-field"><label>翻页间隔（秒）</label><input type="number" min="1" max="10" v-model.number="settings['doc.interval']" @change="saveCfg('doc.interval')"></div>
+              </div>
+              <div class="acx-set-group">
+                <h4>答题</h4>
+                <div class="acx-inline" @click="toggleCfg('quiz.auto_fill')">自动勾选<span class="acx-toggle" :class="{ off: !settings['quiz.auto_fill'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('quiz.auto_submit')">自动提交<span class="acx-toggle" :class="{ off: !settings['quiz.auto_submit'] }"><i></i></span></div>
+                <div class="acx-note">只有全部题目答完且解码置信度足够时才提交。</div>
+                <div class="acx-inline" @click="toggleCfg('quiz.double_check')">两答一致性校验<span class="acx-toggle" :class="{ off: !settings['quiz.double_check'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('quiz.auto_submit_work')">作业自动提交<span class="acx-toggle" :class="{ off: !settings['quiz.auto_submit_work'] }"><i></i></span></div>
+              </div>
+              <div class="acx-set-group">
+                <h4>字体与调试</h4>
+                <div class="acx-inline" @click="toggleCfg('llm.vision')">视觉兜底<span class="acx-toggle" :class="{ off: !settings['llm.vision'] }"><i></i></span></div>
+                <div class="acx-field"><label>参考库地址</label><a-input v-model:value="settings['font.refdb_url']" placeholder="留空=内联一级字库" @change="saveCfg('font.refdb_url')"></a-input></div>
+                <div class="acx-inline" @click="toggleCfg('debug')">调试日志<span class="acx-toggle" :class="{ off: !settings['debug'] }"><i></i></span></div>
+                <button class="acx-btn" style="margin-top:4px" :disabled="testingVision" @click="testVision">{{ testingVision ? '测试中…' : '测试多模态' }}</button>
+                <div class="acx-test">{{ visionResult }}</div>
+                <button class="acx-btn" style="margin-top:8px" :disabled="testingLLM" @click="testLLM">{{ testingLLM ? '测试中…' : '测试 LLM 连接' }}</button>
+                <div class="acx-test">{{ llmResult }}</div>
+              </div>
+            </template>
+          </div>
+          <footer class="acx-foot"><span>AutoCX v{{ version }}</span><span class="right"><a :href="repo.github" target="_blank" rel="noopener noreferrer">GitHub</a><a :href="repo.gitee" target="_blank" rel="noopener noreferrer">Gitee</a><a :href="repo.issues" target="_blank" rel="noopener noreferrer">反馈</a><span>MIT</span></span></footer>
+        </section>
+      </div>
+    </a-config-provider>
+  `;
+
+  const PANEL_SETTING_KEYS = [
+    'llm.base_url', 'llm.api_key', 'llm.model', 'llm.effort', 'llm.timeout', 'llm.stream',
+    'video.speed', 'video.mute', 'quiz.auto_fill', 'quiz.auto_submit', 'quiz.double_check',
+    'quiz.auto_submit_work', 'llm.vision', 'font.refdb_url', 'doc.interval', 'debug',
+  ];
+
+  function createPanelRoot(VueLib) {
+    return {
+      template: PANEL_TEMPLATE,
+      setup() {
+        const { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } = VueLib;
+        const panelOpen = ref(true);
+        const activeTab = ref('status');
+        const enabled = ref(isEnabled());
+        const assistVideo = ref(config.get('assist.video') !== false);
+        const assistQuiz = ref(config.get('assist.quiz') !== false);
+        const progress = ref(0);
+        const videoState = ref('待命');
+        const quizState = ref('待命');
+        const logs = reactive([]);
+        const statuses = reactive([]);
+        const aiPing = ref(null);
+        const settings = reactive({});
+        const panelEl = ref(null);
+        const bodyEl = ref(null);
+        const logEl = ref(null);
+        const pos = reactive({ left: null, top: null });
+        const testingLLM = ref(false);
+        const testingVision = ref(false);
+        const llmResult = ref('');
+        const visionResult = ref('');
+        const tabs = [
+          { key: 'status', label: '状态' }, { key: 'log', label: '日志' },
+          { key: 'ai', label: 'AI' }, { key: 'settings', label: '设置' },
+        ];
+        const modelOptions = [
+          { value: 'deepseek-chat', label: 'deepseek-chat' },
+          { value: 'deepseek-reasoner', label: 'deepseek-reasoner' },
+          { value: 'gpt-4o-mini', label: 'gpt-4o-mini' },
+        ];
+        const effortOptions = [
+          { value: 'low', label: 'low' }, { value: 'medium', label: 'medium' },
+          { value: 'high', label: 'high' }, { value: '', label: '不发送' },
+        ];
+        const repo = REPO;
+        const version = VERSION;
+        const antdTheme = {
+          token: {
+            colorPrimary: '#C2453A', colorText: '#1E2A2F', colorBgContainer: '#FAFAF5',
+            colorBorder: 'rgba(30,42,47,.25)', borderRadius: 2, controlHeight: 28,
+            fontFamily: '-apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+          },
+        };
+        PANEL_SETTING_KEYS.forEach((k) => { settings[k] = config.get(k); });
+        try { aiPing.value = GM_getValue(AI_PING) || null; } catch (_) { aiPing.value = null; }
+
+        const panelStyle = computed(() => {
+          if (pos.left == null || pos.top == null) return {};
+          return { left: pos.left + 'px', top: pos.top + 'px', right: 'auto', bottom: 'auto' };
+        });
+
+        const clampIntoView = () => {
+          const el = panelEl.value;
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const maxLeft = Math.max(0, window.innerWidth - r.width - 8);
+          const maxTop = Math.max(0, window.innerHeight - r.height - 8);
+          const left = Math.min(Math.max(0, r.left), maxLeft);
+          const top = Math.min(Math.max(0, r.top), maxTop);
+          if (left !== r.left || top !== r.top) { pos.left = Math.round(left); pos.top = Math.round(top); }
+        };
+
+        const startDrag = (e) => {
+          if (e.target.closest('button, a, input, .acx-toggle')) return;
+          const el = panelEl.value;
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const dx = e.clientX - r.left;
+          const dy = e.clientY - r.top;
+          const move = (ev) => {
+            const rr = el.getBoundingClientRect();
+            pos.left = Math.round(Math.min(Math.max(0, ev.clientX - dx), Math.max(0, window.innerWidth - rr.width - 8)));
+            pos.top = Math.round(Math.min(Math.max(0, ev.clientY - dy), Math.max(0, window.innerHeight - rr.height - 8)));
+          };
+          const up = () => {
+            document.removeEventListener('mousemove', move);
+            document.removeEventListener('mouseup', up);
+            config.set('autocx.ballPos', { left: pos.left, top: pos.top });
+          };
+          document.addEventListener('mousemove', move);
+          document.addEventListener('mouseup', up);
+          e.preventDefault();
+        };
+
+        const toggleMain = () => {
+          enabled.value = !enabled.value;
+          config.set('autocx.enabled', enabled.value);
+          log.info('panel', `总开关: ${enabled.value ? '开' : '关'}`);
+        };
+        const toggleAssist = (kind) => {
+          if (kind === 'video') { assistVideo.value = !assistVideo.value; config.set('assist.video', assistVideo.value); }
+          else { assistQuiz.value = !assistQuiz.value; config.set('assist.quiz', assistQuiz.value); }
+          log.info('panel', `${kind === 'video' ? '看课助手' : '答题助手'}: ${(kind === 'video' ? assistVideo.value : assistQuiz.value) ? '开' : '关'}`);
+        };
+        const saveCfg = (key) => {
+          const v = settings[key];
+          config.set(key, typeof v === 'number' ? v : v);
+          log.debug('panel', `配置更新 ${key}`);
+        };
+        const toggleCfg = (key) => {
+          settings[key] = !settings[key];
+          config.set(key, settings[key]);
+          log.debug('panel', `配置更新 ${key}`);
+        };
+        const setEffort = (e) => { settings['llm.effort'] = e; saveCfg('llm.effort'); };
+        const testLLM = () => {
+          testingLLM.value = true; llmResult.value = '测试中…';
+          llm.test().then((msg) => { llmResult.value = '✅ ' + msg; })
+            .catch((e) => { llmResult.value = '❌ ' + e.message; })
+            .finally(() => { testingLLM.value = false; });
+        };
+        const testVision = () => {
+          testingVision.value = true; visionResult.value = '测试中…';
+          visionSelfCheck().then((msg) => { visionResult.value = '✅ ' + msg; })
+            .catch((e) => { visionResult.value = '❌ ' + e.message; })
+            .finally(() => { testingVision.value = false; });
+        };
+        const openAI = () => { try { AIW.ensure().open(); } catch (e) { log.error('panel', '打开作答记录失败: ' + e.message); } };
+        const fmtTime = (ts) => (ts ? new Date(ts).toTimeString().slice(0, 8) : '');
+        const aiStateText = (st) => ({
+          off: '自动提交 关', wait: '等待答完', ready: '即将提交', done: '已提交',
+          blocked: '未提交（有未答题）', captcha: '未提交（验证码）',
+        }[st] || '自动提交 关');
+
+        const pushLog = (item) => {
+          logs.push({ time: fmtTime(item.ts), level: item.level || 'info', module: item.module || '', msg: item.msg || '' });
+          if (logs.length > 200) logs.splice(0, logs.length - 200);
+          if (activeTab.value === 'log') nextTick(() => { if (logEl.value) logEl.value.scrollTop = logEl.value.scrollHeight; });
+        };
+        const pushStatus = (item) => {
+          statuses.unshift(item);
+          if (statuses.length > 20) statuses.splice(20);
+          const detail = item.detail || '';
+          if (item.module === 'video' || item.module === 'doc' || item.module === 'knowledge') {
+            videoState.value = detail || item.state || '待命';
+          }
+          if (item.module === 'quiz') quizState.value = detail || item.state || '待命';
+          if (item.module === 'video') {
+            const m = detail.match(/(\d+)%/);
+            if (item.state === 'playing' && m) progress.value = Number(m[1]);
+            if (item.state === 'done') progress.value = 100;
+          }
+        };
+
+        let offs = [];
+        onMounted(() => {
+          const saved = config.get('autocx.ballPos');
+          if (saved && saved.left != null) { pos.left = saved.left; pos.top = saved.top; }
+          try { offs.push(GM_addValueChangeListener(LOG_KEY, (_k, _o, nv, remote) => { if (remote && nv) pushLog(nv); })); } catch (_) { /* 忽略 */ }
+          try { offs.push(GM_addValueChangeListener(STATUS_KEY, (_k, _o, nv, remote) => { if (remote && nv) pushStatus(nv); })); } catch (_) { /* 忽略 */ }
+          try { offs.push(GM_addValueChangeListener(AI_PING, (_k, _o, nv, remote) => { if (remote && nv) aiPing.value = nv; })); } catch (_) { /* 忽略 */ }
+          window.addEventListener('resize', clampIntoView);
+          nextTick(() => { if (pos.left != null) clampIntoView(); });
+        });
+        onBeforeUnmount(() => {
+          offs.forEach((id) => { try { GM_removeValueChangeListener(id); } catch (_) { /* 忽略 */ } });
+          offs = [];
+          window.removeEventListener('resize', clampIntoView);
+        });
+
+        return {
+          panelOpen, activeTab, enabled, assistVideo, assistQuiz, progress, videoState, quizState,
+          logs, statuses, aiPing, settings, panelEl, bodyEl, logEl, tabs, modelOptions, effortOptions, repo, version,
+          antdTheme, panelStyle, startDrag, toggleMain, toggleAssist, saveCfg, toggleCfg, setEffort,
+          testLLM, testVision, openAI, fmtTime, aiStateText, testingLLM, testingVision, llmResult, visionResult,
+        };
+      },
+    };
   }
 
   /* ============================== 通用:完成检测 =========================== */
@@ -3506,3 +3356,4 @@
   }
 
 })();
+
