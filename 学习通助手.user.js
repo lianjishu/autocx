@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      1.0.0
+// @version      1.0.1
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -1368,15 +1368,17 @@
     #autocx-vue-root .acx-panel::after{content:"";position:absolute;top:0;right:0;width:22px;height:22px;
       background:linear-gradient(225deg,#D9DCD2 50%,#F1F2EB 50%);border-left:1px solid rgba(30,42,47,.14);border-bottom:1px solid rgba(30,42,47,.14)}
     #autocx-vue-root .acx-margin-rule{position:absolute;left:22px;top:0;bottom:0;width:1px;background:rgba(194,69,58,.32);pointer-events:none}
-    #autocx-vue-root .acx-head{display:flex;align-items:center;gap:10px;padding:17px 20px 12px 34px;cursor:grab;user-select:none}
-    #autocx-vue-root .acx-head:active{cursor:grabbing}
+    #autocx-vue-root .acx-head{display:flex;align-items:center;gap:10px;padding:17px 20px 12px 34px;cursor:default}
+    #autocx-vue-root .acx-head-drag{display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:grab;margin:-10px 0 -8px;padding:10px 0 8px;user-select:none}
+    #autocx-vue-root .acx-head-drag:active{cursor:grabbing}
+    #autocx-vue-root .acx-head-tools{display:flex;align-items:center;gap:4px;flex:none;cursor:default}
     #autocx-vue-root .acx-seal{width:32px;height:32px;background:#C2453A;color:#FFF9F0;display:flex;align-items:center;justify-content:center;
       font:700 12px/1 Georgia,"Songti SC",serif;letter-spacing:.06em;transform:rotate(-2.5deg);
       box-shadow:inset 0 0 0 2px rgba(255,255,255,.24);flex:none}
     #autocx-vue-root .acx-title{display:flex;flex-direction:column;line-height:1.15}
     #autocx-vue-root .acx-title strong{font:600 19px/1.1 Georgia,"Songti SC","SimSun",serif;letter-spacing:-.01em}
     #autocx-vue-root .acx-title span{font-size:10px;color:#7C8688;margin-top:3px;letter-spacing:.12em}
-    #autocx-vue-root .acx-switch{margin-left:auto;width:34px;height:18px;border:1px solid #1E2A2F;background:#FAFAF5;position:relative;cursor:pointer;padding:0}
+    #autocx-vue-root .acx-switch{width:34px;height:18px;border:1px solid #1E2A2F;background:#FAFAF5;position:relative;cursor:pointer;padding:0}
     #autocx-vue-root .acx-switch i{position:absolute;top:2px;right:2px;width:12px;height:12px;background:#C2453A;transition:.15s}
     #autocx-vue-root .acx-switch.off i{right:auto;left:2px;background:#B9C0BB}
     #autocx-vue-root .acx-min{width:22px;height:20px;border:0;background:transparent;color:#7C8688;font-size:15px;line-height:1;cursor:pointer;padding:0;margin-left:2px}
@@ -1443,7 +1445,8 @@
     /* ---------- 书签 ---------- */
     #autocx-vue-root .acx-bookmark{position:fixed;right:0;top:31%;width:28px;height:124px;background:#FAFAF5;border:1px solid rgba(30,42,47,.25);border-right:0;
       box-shadow:0 8px 22px rgba(30,42,47,.18);display:flex;flex-direction:column;align-items:center;padding:9px 0 8px;cursor:pointer;
-      font:600 9px/1.2 Georgia,"Songti SC",serif;color:#1E2A2F;letter-spacing:.08em}
+      font:600 9px/1.2 Georgia,"Songti SC",serif;color:#1E2A2F;letter-spacing:.08em;user-select:none;touch-action:none}
+    #autocx-vue-root .acx-bookmark.dragging{cursor:grabbing;box-shadow:0 12px 28px rgba(30,42,47,.28)}
     #autocx-vue-root .acx-bookmark::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:#C2453A}
     #autocx-vue-root .acx-bm-text{writing-mode:vertical-rl;text-orientation:mixed;letter-spacing:.16em}
     #autocx-vue-root .acx-bm-bar{width:3px;flex:1;background:rgba(30,42,47,.1);margin:7px 0;position:relative}
@@ -1465,11 +1468,13 @@
   const PANEL_TEMPLATE = `
     <a-config-provider :theme="antdTheme">
       <div class="acx-ui">
-        <div v-if="!panelOpen" class="acx-bookmark" @click="panelOpen = true" title="展开 AutoCX">
+        <div v-if="!panelOpen" class="acx-bookmark" :class="{ dragging: bookmarkDragging }" :style="bookmarkStyle"
+          @pointerdown="startBookmarkDrag" @keydown.enter.prevent="panelOpen = true" @keydown.space.prevent="panelOpen = true"
+          tabindex="0" role="button" title="单击展开；上下拖动可移动">
           <span class="acx-bm-text">AutoCX</span>
           <span class="acx-bm-bar"><i :style="{ height: progress + '%' }"></i></span>
           <span class="acx-bm-pct">{{ progress || '—' }}</span>
-          <div class="acx-bm-menu" @click.stop>
+          <div class="acx-bm-menu" @pointerdown.stop @click.stop>
             <div class="mi" @click="panelOpen = true"><span>展开面板</span><span class="st">›</span></div>
             <div class="mi" @click="toggleAssist('video')"><span>看课助手</span><b>{{ assistVideo ? '已开启' : '已关闭' }}</b></div>
             <div class="mi" @click="toggleAssist('quiz')"><span>答题助手</span><b>{{ assistQuiz ? '已开启' : '已关闭' }}</b></div>
@@ -1480,11 +1485,15 @@
 
         <section v-if="panelOpen" class="acx-panel" :style="panelStyle" ref="panelEl">
           <div class="acx-margin-rule"></div>
-          <header class="acx-head" @mousedown="startDrag">
-            <div class="acx-seal">CX</div>
-            <div class="acx-title"><strong>AutoCX</strong><span>学习通助手</span></div>
-            <button class="acx-switch" :class="{ off: !enabled }" @click="toggleMain" :title="enabled ? '总开关：开' : '总开关：关'"><i></i></button>
-            <button class="acx-min" @click="panelOpen = false" title="收起为书签">—</button>
+          <header class="acx-head">
+            <div class="acx-head-drag" @mousedown="startDrag">
+              <div class="acx-seal">CX</div>
+              <div class="acx-title"><strong>AutoCX</strong><span>学习通助手</span></div>
+            </div>
+            <div class="acx-head-tools">
+              <button class="acx-switch" :class="{ off: !enabled }" @click="toggleMain" :title="enabled ? '总开关：开' : '总开关：关'"><i></i></button>
+              <button class="acx-min" @click="collapsePanel" title="收起为书签">—</button>
+            </div>
           </header>
           <div class="acx-head-rule"></div>
           <div class="acx-ledger">
@@ -1600,6 +1609,8 @@
         const bodyEl = ref(null);
         const logEl = ref(null);
         const pos = reactive({ left: null, top: null });
+        const bookmarkTop = ref(null);
+        const bookmarkDragging = ref(false);
         const testingLLM = ref(false);
         const testingVision = ref(false);
         const llmResult = ref('');
@@ -1633,6 +1644,56 @@
           if (pos.left == null || pos.top == null) return {};
           return { left: pos.left + 'px', top: pos.top + 'px', right: 'auto', bottom: 'auto' };
         });
+        const bookmarkStyle = computed(() => (bookmarkTop.value == null ? {} : { top: bookmarkTop.value + 'px' }));
+
+        const clampBookmark = () => {
+          const el = document.querySelector('#autocx-vue-root .acx-bookmark');
+          if (!el) return;
+          const h = el.offsetHeight || 124;
+          const top = bookmarkTop.value == null ? el.getBoundingClientRect().top : bookmarkTop.value;
+          const maxTop = Math.max(8, window.innerHeight - h - 8);
+          const clamped = Math.min(Math.max(8, top), maxTop);
+          if (bookmarkTop.value != null || clamped !== top) bookmarkTop.value = Math.round(clamped);
+        };
+
+        const startBookmarkDrag = (e) => {
+          if (e.button !== 0 || e.target.closest('.acx-bm-menu')) return;
+          const el = e.currentTarget;
+          const startY = e.clientY;
+          const rect0 = el.getBoundingClientRect();
+          const startTop = rect0.top;
+          const h = rect0.height;
+          let moved = false;
+          let lastTop = Math.round(startTop);
+          const move = (ev) => {
+            const dy = ev.clientY - startY;
+            if (!moved && Math.abs(dy) < 5) return;
+            moved = true;
+            bookmarkDragging.value = true;
+            lastTop = Math.round(Math.min(Math.max(8, startTop + dy), Math.max(8, window.innerHeight - h - 8)));
+            bookmarkTop.value = lastTop;
+          };
+          const up = () => {
+            document.removeEventListener('pointermove', move);
+            document.removeEventListener('pointerup', up);
+            document.removeEventListener('pointercancel', up);
+            bookmarkDragging.value = false;
+            if (!moved) {
+              panelOpen.value = true;
+              nextTick(() => { if (pos.left != null) clampIntoView(); });
+            } else {
+              config.set('autocx.bookmarkTop', lastTop);
+            }
+          };
+          document.addEventListener('pointermove', move);
+          document.addEventListener('pointerup', up);
+          document.addEventListener('pointercancel', up);
+          e.preventDefault();
+        };
+        const collapsePanel = () => {
+          panelOpen.value = false;
+          nextTick(clampBookmark);
+        };
 
         const clampIntoView = () => {
           const el = panelEl.value;
@@ -1727,26 +1788,30 @@
           }
         };
 
+        const onResize = () => { clampIntoView(); clampBookmark(); };
+
         let offs = [];
         onMounted(() => {
           const saved = config.get('autocx.ballPos');
           if (saved && saved.left != null) { pos.left = saved.left; pos.top = saved.top; }
+          const savedBookmark = config.get('autocx.bookmarkTop');
+          if (savedBookmark != null) bookmarkTop.value = Number(savedBookmark);
           try { offs.push(GM_addValueChangeListener(LOG_KEY, (_k, _o, nv, remote) => { if (remote && nv) pushLog(nv); })); } catch (_) { /* 忽略 */ }
           try { offs.push(GM_addValueChangeListener(STATUS_KEY, (_k, _o, nv, remote) => { if (remote && nv) pushStatus(nv); })); } catch (_) { /* 忽略 */ }
           try { offs.push(GM_addValueChangeListener(AI_PING, (_k, _o, nv, remote) => { if (remote && nv) aiPing.value = nv; })); } catch (_) { /* 忽略 */ }
-          window.addEventListener('resize', clampIntoView);
-          nextTick(() => { if (pos.left != null) clampIntoView(); });
+          window.addEventListener('resize', onResize);
+          nextTick(() => { if (pos.left != null) clampIntoView(); clampBookmark(); });
         });
         onBeforeUnmount(() => {
           offs.forEach((id) => { try { GM_removeValueChangeListener(id); } catch (_) { /* 忽略 */ } });
           offs = [];
-          window.removeEventListener('resize', clampIntoView);
+          window.removeEventListener('resize', onResize);
         });
 
         return {
           panelOpen, activeTab, enabled, assistVideo, assistQuiz, progress, videoState, quizState,
           logs, statuses, aiPing, settings, panelEl, bodyEl, logEl, tabs, modelOptions, effortOptions, repo, version,
-          antdTheme, panelStyle, startDrag, toggleMain, toggleAssist, saveCfg, toggleCfg, setEffort,
+          antdTheme, panelStyle, bookmarkStyle, bookmarkDragging, startBookmarkDrag, startDrag, collapsePanel, toggleMain, toggleAssist, saveCfg, toggleCfg, setEffort,
           testLLM, testVision, openAI, fmtTime, aiStateText, testingLLM, testingVision, llmResult, visionResult,
         };
       },
