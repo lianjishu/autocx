@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      1.0.6
-// @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
+// @version      1.0.8
+// @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验/作业/随堂练习答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
 // @homepage     https://github.com/lianjishu/autocx
@@ -52,6 +52,16 @@
 (function () {
   'use strict';
 
+  /* ---------------------------------------------------------------------
+   * 自带的 Vue3 / AntD 必须在页面脚本覆盖 window 之前抓住。
+   * 随堂练习页(mobilelearn)自带 Vue2,会把 window.Vue 换掉;
+   * 若运行时才去读 window.Vue,拿到的是页面的 Vue2,面板就挂不上。
+   * @require 的 vue.global.prod.js / antd.min.js 在本 IIFE 之前求值,
+   * 故此处直接取引用,后续不再依赖 window.Vue。
+   * ------------------------------------------------------------------- */
+  const VUE3 = (typeof Vue !== 'undefined' && Vue && typeof Vue.createApp === 'function') ? Vue : null;
+  const ANTD = (typeof antd !== 'undefined' && antd && antd.ConfigProvider) ? antd : null;
+
   /* ============================== SELECTORS ============================== */
   // 页面结构变化时,优先在这里调整选择器
   const SELECTORS = {
@@ -88,6 +98,21 @@
       save: 'a.btnSave, .btnSave',                   // 保存草稿(noSubmit())
       captchaWin: '#verifyCodeWin',                  // 验证码弹窗(出现则转人工)
     },
+    // 随堂练习(mobilelearn 的 Vue 应用 answerQuestion2)
+    practice: {
+      root: '#main.respond-container',              // Vue 挂载点(__vue__ 挂在这里)
+      question: '.left-question-list .question-item', // 单题容器(与 vm.questionList 同序)
+      title: '.question-name',                       // 题干容器(含题型标记)
+      typeMark: '.question-name .grey-text',         // 【Monoselect】等题型标记
+      stem: '.question-name .html-content-box',      // 题干正文
+      option: '.option-list > li',                   // 选项
+      optionLetter: '.option-letter',                // 选项字母
+      optionText: '.option-result',                  // 选项正文
+      blankInput: '.option-fill-list input.ofl-ipt', // 填空输入框
+      shortInput: '.short-answer-textarea textarea', // 主观题输入框
+      submit: '.submit-btn',                         // 提交按钮
+      submitConfirm: '.popBottom a.jb_btn.dialog_affrim, a.jb_btn.dialog_affirm', // 确认弹窗按钮
+    },
     // 顶层章节页
     top: {
       jobUnit: '.posCatalog_select',        // 章节列表项
@@ -120,6 +145,7 @@
     'quiz.auto_fill': true,
     'quiz.auto_submit': false, // 自动提交(仅全部答完才生效,默认关闭)
     'quiz.auto_submit_work': false, // 作业(work)单独开关:作业常只能交一次,默认只填不交
+    'quiz.auto_submit_practice': false, // 随堂练习单独开关:平台本身会在截止时自动交,默认只填不交
     'quiz.double_check': true, // 两答一致性校验:解码置信足够时只对多选题/填空/低置信题复核
     // ---- 字体反混淆(超星 font-cxsecret) ----
     'font.decode': true,       // 关掉则退回老行为(直接把密文丢给模型)
@@ -166,7 +192,7 @@
 
   /* ============================== 角色识别 ================================= */
   // 学习通课程任务页是多层嵌套 iframe;每个帧按 URL 特征识别自己的角色。
-  // 返回: 'top' | 'video' | 'audio' | 'doc' | 'book' | 'quiz' | null
+  // 返回: 'top' | 'video' | 'audio' | 'doc' | 'book' | 'quiz' | 'practice' | null
   function detectRole() {
     const { hostname, pathname, href } = location;
     const path = pathname.toLowerCase();
@@ -176,6 +202,11 @@
     if (/\/ananas\/modules\/audio\/index\.html/.test(path)) return 'audio';
     if (/\/ananas\/modules\/(pdf|ppt|pptdemo)\//.test(path)) return 'doc';
     if (/\/ananas\/modules\/(innertemplet|book|read)\//.test(path)) return 'book';
+
+    // 随堂练习/课堂测验(mobilelearn 的 Vue 应用):
+    //   /page/quiz/stu/answerQuestion2  -> 作答页(本脚本要答的就是它)
+    //   /page/quiz/stu/quizStudentQuestion -> 成绩/批阅回看页,绝不作答
+    if (/\/page\/quiz\/stu\/answerquestion2/i.test(path)) return 'practice';
 
     // 章节测验/作业答卷页
     // 排除批阅/查看页(提交后跳转的 selectWorkQuestionYiPiYue 等):只读或复答草稿,
@@ -323,9 +354,67 @@
     };
   }
 
+  /**
+   * 开启一次"AI 作答记录"会话(章节测验 / 随堂练习共用)。
+   * 返回 { sid, aiMeta, metaWrite, convs, writer }:
+   *   - convs[i]  第 i 题的记录对象(流式写入 AI_C)
+   *   - writer(i) 第 i 题的节流写入器
+   *   - metaWrite 把会话元信息刷到 AI_S + AI_PING(顶层面板据此显示进度)
+   */
+  function startAiSession(opts) {
+    const sid = opts.sid;
+    const aiMeta = {
+      sid,
+      workKey: opts.workKey || sid,
+      title: String(opts.title || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+      count: opts.questions.length,
+      source: opts.source || '',
+      concurrency: opts.concurrency || 2,
+      model: config.get('llm.model'),
+      effort: String(config.get('llm.effort') || ''),
+      host: String(config.get('llm.base_url') || '').replace(/^https?:\/\//, '').replace(/\/.*$/, ''),
+      keyTail: String(config.get('llm.api_key') || '').slice(-4),
+      startAt: Date.now(),
+      answeredAt: 0,
+      answered: 0,
+      failed: 0,
+      submitState: opts.submitState || 'off',
+      submitDetail: '',
+      events: [],
+    };
+    aibus.touchIndex(aiMeta);
+    const metaWrite = () => {
+      const snap = Object.assign({}, aiMeta, { events: aiMeta.events.slice(-20) });
+      aibus.put(AI_S(sid), snap);
+      aibus.put(AI_PING, {
+        sid, title: snap.title, count: snap.count, answered: snap.answered,
+        failed: snap.failed, submitState: snap.submitState, model: snap.model,
+        source: snap.source, ts: Date.now(),
+      });
+    };
+    metaWrite();
+
+    const convs = opts.questions.map((q) => {
+      const c = {
+        index: q.index, type: q.type, stem: q.stem, options: q.options || [],
+        source: aiMeta.source, phase: 'queued', prompt: '', params: null,
+        thinking: '', answer: '', streamed: true, result: null, usage: null,
+        error: null, attempt: 0, t: { queuedAt: Date.now() },
+        decode: q.decode || null, grade: q.grade || '',
+      };
+      aibus.put(AI_C(sid, q.index), convSnapshot(c));
+      return c;
+    });
+    const writers = new Map();
+    const writer = (index) => {
+      if (!writers.has(index)) writers.set(index, makeConvWriter(sid, index));
+      return writers.get(index);
+    };
+    return { sid, aiMeta, metaWrite, convs, writer };
+  }
+
   /* ============================== 总开关 =================================== */
-  function isEnabled() {
-    return config.get('autocx.enabled') !== false;
+  function isEnabled() {    return config.get('autocx.enabled') !== false;
   }
 
   /* ============================== SSE 增量解析 ============================= */
@@ -998,8 +1087,8 @@
   `;
 
   function createAIWindow() {
-    const V = (typeof window !== 'undefined' && window.Vue) ? window.Vue : (typeof Vue !== 'undefined' ? Vue : null);
-    const A = (typeof window !== 'undefined' && window.antd) ? window.antd : (typeof antd !== 'undefined' ? antd : null);
+    const V = VUE3 || ((typeof window !== 'undefined' && window.Vue && window.Vue.createApp) ? window.Vue : null);
+    const A = ANTD || ((typeof window !== 'undefined' && window.antd) ? window.antd : (typeof antd !== 'undefined' ? antd : null));
     if (!V || !V.createApp || !A) {
       return {
         open() { log.error('ai', 'Vue/AntD 未加载，作答记录窗口不可用'); },
@@ -1329,8 +1418,8 @@
   // 只在 top 帧渲染;通过 GM_addValueChangeListener 聚合各任务帧的日志/状态。
   // 视觉:批注纸(纸白 + 墨 + 红笔),收起为右缘书签。
   function initTopPanel() {
-    const V = (typeof window !== 'undefined' && window.Vue) ? window.Vue : (typeof Vue !== 'undefined' ? Vue : null);
-    const A = (typeof window !== 'undefined' && window.antd) ? window.antd : (typeof antd !== 'undefined' ? antd : null);
+    const V = VUE3 || ((typeof window !== 'undefined' && window.Vue && window.Vue.createApp) ? window.Vue : null);
+    const A = ANTD || ((typeof window !== 'undefined' && window.antd) ? window.antd : (typeof antd !== 'undefined' ? antd : null));
     if (!V || !V.createApp) {
       log.error('panel', 'Vue 未加载，悬浮面板不可用（业务逻辑继续）');
       return;
@@ -1564,6 +1653,7 @@
                 <div class="acx-note">只有全部题目答完且解码置信度足够时才提交。</div>
                 <div class="acx-inline" @click="toggleCfg('quiz.double_check')">两答一致性校验<span class="acx-toggle" :class="{ 'acx-off': !settings['quiz.double_check'] }"><i></i></span></div>
                 <div class="acx-inline" @click="toggleCfg('quiz.auto_submit_work')">作业自动提交<span class="acx-toggle" :class="{ 'acx-off': !settings['quiz.auto_submit_work'] }"><i></i></span></div>
+                <div class="acx-inline" @click="toggleCfg('quiz.auto_submit_practice')">随堂练习自动提交<span class="acx-toggle" :class="{ 'acx-off': !settings['quiz.auto_submit_practice'] }"><i></i></span></div>
               </div>
               <div class="acx-set-group">
                 <h4>字体与调试</h4>
@@ -1586,7 +1676,7 @@
   const PANEL_SETTING_KEYS = [
     'llm.base_url', 'llm.api_key', 'llm.model', 'llm.effort', 'llm.timeout', 'llm.stream',
     'video.speed', 'video.mute', 'quiz.auto_fill', 'quiz.auto_submit', 'quiz.double_check',
-    'quiz.auto_submit_work', 'llm.vision', 'font.refdb_url', 'doc.interval', 'debug',
+    'quiz.auto_submit_work', 'quiz.auto_submit_practice', 'llm.vision', 'font.refdb_url', 'doc.interval', 'debug',
   ];
 
   function createPanelRoot(VueLib) {
@@ -1781,7 +1871,7 @@
           if (item.module === 'video' || item.module === 'doc' || item.module === 'knowledge') {
             videoState.value = detail || item.state || '待命';
           }
-          if (item.module === 'quiz') quizState.value = detail || item.state || '待命';
+          if (item.module === 'quiz' || item.module === 'practice') quizState.value = detail || item.state || '待命';
           if (item.module === 'video') {
             const m = detail.match(/(\d+)%/);
             if (item.state === 'playing' && m) progress.value = Number(m[1]);
@@ -2398,6 +2488,132 @@
     });
   }
 
+  /* ============================== 答题公共件 ============================= */
+  // 章节测验(doHomeWorkNew)与随堂练习(answerQuestion2)共用:
+  //   - buildPrompt / normalizeLetters / parseAnswer:纯函数,无 DOM 依赖
+  //     (test/parse-answer.test.js 会抽取它们做回归,勿引入外部变量)
+  //   - htmlToText:把接口里的 HTML 题干/选项压成纯文本
+  // 注:随堂练习的题干/选项本身就是明文(该页无字体混淆),故这里不需要解码。
+
+  function htmlToText(html) {
+    return String(html == null ? '' : html)
+      .replace(/<br\s*\/?>/gi, ' ')
+      .replace(/<\/(p|div|li|tr|h[1-6])>/gi, ' ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&amp;/gi, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /* ---------- Prompt 构建 ---------- */
+  // 解码成功就直接给明文 —— 以前那句"形近乱码请推断"是错误先验,会把模型带进瞎猜。
+  function buildPrompt(q) {
+    const typeName = { single: '单选题', multi: '多选题', judge: '判断题', blank: '填空题', subjective: '简答题' }[q.type];
+    let p = `请回答下面这道${typeName}。\n题目:${q.stem}\n`;
+    const unknown = (q.decode && q.decode.unknown) || '';
+    if (unknown) {
+      p += `(个别字符未能还原:${unknown};若不影响理解请忽略,否则按上下文推断)\n`;
+    }
+    if (q.type === 'judge') {
+      // 判断题的选项文案各平台不一(有的"对/错",有的"正确/错误"),
+      // 但语义固定:A=正确、B=错误。统一写死,免得模型拿到"对/错"猜错。
+      p += 'A、正确\nB、错误\n';
+    } else if (q.options.length) {
+      p += q.options.map((o) => `${o.label}、${o.text}`).join('\n') + '\n';
+    }
+    if (q.type === 'blank') {
+      const n = Number(q.blankCount || 0);
+      p += n > 1 ? `要求:直接给出每个空的答案,共 ${n} 个空,用|分隔,不要任何解释。\n`
+        : '要求:直接给出每个空的答案,多空用|分隔,不要任何解释。\n';
+    } else if (q.type === 'multi') {
+      // 多选题有时平台限了项数(如"至少2项最多4项"),提交时会校验,得告诉模型
+      const lim = q.limits || null;
+      if (lim && (lim.min || lim.max)) {
+        const parts = [];
+        if (lim.min > 0) parts.push(`至少选 ${lim.min} 项`);
+        if (lim.max > 0) parts.push(`最多选 ${lim.max} 项`);
+        if (parts.length) p += `要求:这是多选题,${parts.join(',')},只回复所有正确选项的字母(如 BCD),不要任何解释。\n`;
+        else p += '要求:这是多选题,只回复所有正确选项的字母(如 BCD),不要任何解释。\n';
+      } else {
+        p += '要求:这是多选题,只回复所有正确选项的字母(如 BCD),不要任何解释。\n';
+      }
+    } else if (q.type === 'subjective') {
+      p += '要求:直接写出答案要点(可分条),不要输出选项字母,不要复述题目。\n';
+    } else {
+      p += '要求:只回复正确选项的字母(如 B),不要任何解释。\n';
+    }
+    return p;
+  }
+
+  /* ---------- 答案规范化:全角转半角,兼容 BCD / B,C,D / B、C、D / B C D / 带解释 ---------- */
+  function normalizeLetters(raw) {
+    if (!raw) return '';
+    // 全角字母转半角
+    let text = String(raw).replace(/[Ａ-Ｇａ-ｇ]/g, (c) => {
+      const code = c.charCodeAt(0);
+      return String.fromCharCode(code >= 0xFF41 ? code - 0xFF41 + 97 : code - 0xFF21 + 65);
+    }).toUpperCase();
+    const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+    // 1) 从后往前找"纯答案行"(可带"答案:"前缀,只含字母与分隔符)
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = lines[i].match(/^(?:答案[:：是\s]*)?([A-G](?:[\s,，、;；·]*[A-G])*)[。.]?$/);
+      if (m) return m[1].replace(/[^A-G]/g, '');
+    }
+    // 2) 行尾答案: "...所以选 BCD" / "answer: BCD"
+    const tail = text.match(/([A-G](?:[\s,，、;；]*[A-G])+|\b[A-G]\b)\s*[。.]?\s*$/);
+    if (tail) return tail[1].replace(/[^A-G]/g, '');
+    // 3) 兜底:全文本字母去重排序(可能混入解释里的字母,仅保底)
+    return [...new Set(text.match(/[A-G]/g) || [])].sort().join('');
+  }
+
+  /* ---------- 答案解析 ---------- */
+  function parseAnswer(q, raw) {
+    const text = String(raw || '').trim();
+    if (q.type === 'subjective') {
+      // 主观题:答案就是文本本身,只剥掉"答案:"这类前缀
+      const body = text.replace(/^\s*(答案|参考答案|Answer)\s*[:：]\s*/i, '').trim();
+      return body
+        ? { ok: true, display: body.slice(0, 200), text: body, normalized: body }
+        : { ok: false, display: text.slice(0, 30), normalized: '' };
+    }
+    if (q.type === 'blank') {
+      const parts = text.split(/[|｜]/).map((s) => s.trim()).filter(Boolean);
+      return parts.length
+        ? { ok: true, display: parts.join(' | '), blanks: parts, normalized: parts.join('|') }
+        : { ok: false, display: text.slice(0, 30), normalized: '' };
+    }
+    const norm = normalizeLetters(text);
+    if (!norm) {
+      // 判断题有时模型直接答"对/错""正确/错误""True/False",而不是字母。
+      // 这时按选项文本反查对应的字母。
+      if ((q.type === 'judge' || q.type === 'single') && (q.options || []).length) {
+        const raw = String(text).replace(/\s+/g, '').toLowerCase();
+        const hit = q.options.find((o) => {
+          const t = String(o.text || '').replace(/\s+/g, '').toLowerCase();
+          return t && (raw === t || raw.includes(t));
+        });
+        if (hit && hit.label) {
+          const L = String(hit.label).trim().toUpperCase();
+          if (/^[A-G]$/.test(L)) {
+            return { ok: true, display: L, letters: [L], normalized: L };
+          }
+        }
+      }
+      return { ok: false, display: text.slice(0, 30), normalized: '' };
+    }
+    if (q.type === 'single' || q.type === 'judge') {
+      const letter = norm[0];
+      return { ok: true, display: letter, letters: [letter], normalized: letter };
+    }
+    // 多选:保留完整字母序列(排序规范化,填写用 includes 判断与顺序无关)
+    const sorted = norm.split('').sort().join('');
+    return { ok: true, display: sorted, letters: sorted.split(''), normalized: sorted };
+  }
+
   /* ============================== quiz-page =============================== */
   // 章节测验/作业: 接口劫持/DOM 提取题目 -> 字体解码 -> LLM -> 自动勾选 -> 条件自动提交
   function initQuizPage() {
@@ -2421,6 +2637,43 @@
       } catch (e) { return false; }
     }
 
+    /**
+     * 是否存在"可见的提交入口"。
+     * 2026 版章节测验的提交按钮是 <a onclick="btnBlueSubmit()">,选择器里没有;
+     * 而弹窗里的 OK 按钮(#submitBack 内)虽然文案含 submit,但默认隐藏,不能算。
+     * 故这里除 CSS 选择器外,再按"可见 + 文案是提交/交卷/Submit"兜底找一次。
+     */
+    function hasVisibleSubmit() {
+      if ($(SELECTORS.quiz.submit).filter(':visible').length > 0) return true;
+      const hit = Array.prototype.some.call(
+        document.querySelectorAll('a, button, div, span'),
+        (el) => {
+          if (el.offsetWidth === 0 && el.offsetHeight === 0) return false;
+          const t = (el.textContent || '').trim();
+          if (!/^(提交|交卷|Submit|提交作业)$/i.test(t)) return false;
+          const oc = el.getAttribute('onclick') || '';
+          return /submit/i.test(oc) || /btnBlueSubmit/.test(oc);
+        }
+      );
+      return hit;
+    }
+
+    /** 找到可见的提交按钮(与 hasVisibleSubmit 同一套判定,只是返回元素) */
+    function findSubmitBtn() {
+      const byCss = $(SELECTORS.quiz.submit).filter(':visible').get(0);
+      if (byCss) return byCss;
+      return Array.prototype.find.call(
+        document.querySelectorAll('a, button, div, span'),
+        (el) => {
+          if (el.offsetWidth === 0 && el.offsetHeight === 0) return false;
+          const t = (el.textContent || '').trim();
+          if (!/^(提交|交卷|Submit|提交作业)$/i.test(t)) return false;
+          const oc = el.getAttribute('onclick') || '';
+          return /submit/i.test(oc) || /btnBlueSubmit/.test(oc);
+        }
+      ) || null;
+    }
+
     /** 页面状态机:先看"还能不能交",再看标记,拿不准就返回 unknown(不动手) */
     function detectWorkState() {
       const body = String(document.body ? document.body.innerText : '').replace(/\s+/g, ' ');
@@ -2432,17 +2685,24 @@
         const i = document.querySelector('input[name=pyFlag]');
         return i ? String(i.value || '').trim() : '';
       })();
+      // 已作答题数:只数真正带答案的隐藏域。
+      // 注意 answerId 是"答卷 id"、answertype 是题型标记,都不是某题的答案,不能计入。
       const answered = Array.from(document.querySelectorAll('input[type=hidden][name^=answer]'))
-        .filter((i) => !/^answertype/i.test(i.name || '') && String(i.value || '').trim()).length;
+        .filter((i) => /^answer\d+$/i.test(String(i.name || '')) && String(i.value || '').trim()).length;
       let hasSubmit = false;
-      try { hasSubmit = $(SELECTORS.quiz.submit).filter(':visible').length > 0; } catch (e) { hasSubmit = false; }
+      try { hasSubmit = hasVisibleSubmit(); } catch (e) { hasSubmit = false; }
       const base = { answered: answered, statusText: statusText, pyFlag: pyFlag };
       if (hasSubmit) return Object.assign({ state: answered ? 'draft' : 'todo' }, base);
+      // 页面已过截止时间:认中英文两种文案
+      // (2026 版是英文 "expired，Unable to answer";中文页是"已过期/不允许作答")
+      // 注意不能只匹配"截止/Deadline"——未开放的测验也会显示截止时间,会误判成已截止。
+      if (/已过期|不允许作答|无法作答|不允许提交|已关闭|逾期|expired|unable to answer|not\s+allowed\s+to\s+answer/i.test(body)) {
+        return Object.assign({ state: 'closed' }, base);
+      }
       if (pyFlag || /我的答案|正确答案|批阅|查看答案|查看解析|得分/.test(body)) {
         return Object.assign({ state: 'reviewed' }, base);
       }
       if (/已提交|已完成|已交|提交成功/.test(body)) return Object.assign({ state: 'submitted' }, base);
-      if (/截止|逾期|已结束|已关闭|不允许提交/.test(body)) return Object.assign({ state: 'closed' }, base);
       return Object.assign({ state: 'unknown' }, base);
     }
 
@@ -2643,53 +2903,19 @@
 
       /* ---------- 作答记录:会话快照 + 每题初始状态(供 AI 记录窗口消费) ---------- */
       const sid = 'w' + String(workKey).replace(/[^0-9a-z]/gi, '').slice(0, 16);
-      const aiMeta = {
-        sid, workKey,
+      const sess = startAiSession({
+        sid,
+        workKey,
         title: String(document.title || '').replace(/\s+/g, ' ').trim().slice(0, 80) || '章节测验',
-        count: questions.length,
+        questions,
         source: captured ? '接口明文' : (fontInfo ? 'DOM + 字体解码' : 'DOM 提取'),
-        concurrency: 2,
-        model: config.get('llm.model'),
-        effort: String(config.get('llm.effort') || ''),
-        host: String(config.get('llm.base_url') || '').replace(/^https?:\/\//, '').replace(/\/.*$/, ''),
-        keyTail: String(config.get('llm.api_key') || '').slice(-4),
-        startAt: Date.now(),
-        answeredAt: 0,
-        answered: 0,
-        failed: 0,
         submitState: config.get(isWorkPage() ? 'quiz.auto_submit_work' : 'quiz.auto_submit') ? 'wait' : 'off',
-        submitDetail: '',
-        events: [],
-      };
-      aibus.touchIndex(aiMeta);
-      const metaWrite = () => {
-        const snap = Object.assign({}, aiMeta, { events: aiMeta.events.slice(-20) });
-        aibus.put(AI_S(sid), snap);
-        aibus.put(AI_PING, {
-          sid, title: snap.title, count: snap.count, answered: snap.answered,
-          failed: snap.failed, submitState: snap.submitState, model: snap.model,
-          source: snap.source, ts: Date.now(),
-        });
-      };
-      metaWrite();
-      aiSession = { sid, meta: aiMeta };
-
-      const convs = questions.map((q) => {
-        const c = {
-          index: q.index, type: q.type, stem: q.stem, options: q.options || [],
-          source: aiMeta.source, phase: 'queued', prompt: '', params: null,
-          thinking: '', answer: '', streamed: true, result: null, usage: null,
-          error: null, attempt: 0, t: { queuedAt: Date.now() },
-          decode: q.decode || null, grade: q.grade || '',
-        };
-        aibus.put(AI_C(sid, q.index), convSnapshot(c));
-        return c;
       });
-      const writers = new Map();
-      const writer = (index) => {
-        if (!writers.has(index)) writers.set(index, makeConvWriter(sid, index));
-        return writers.get(index);
-      };
+      const aiMeta = sess.aiMeta;
+      const metaWrite = sess.metaWrite;
+      const convs = sess.convs;
+      const writer = sess.writer;
+      aiSession = { sid, meta: aiMeta };
 
       // 未配置 API Key:只提取不答题
       if (!config.get('llm.api_key')) {
@@ -2955,7 +3181,7 @@
           win.alert = () => true;
           setTimeout(() => { win.confirm = oldConfirm; win.alert = oldAlert; }, 10000);
 
-          const btn = $(SELECTORS.quiz.submit).filter(':visible').get(0);
+          const btn = findSubmitBtn();
           if (!btn) {
             const bodyText = document.body.innerText || '';
             if (/已提交|已完成|查看答案|答案解析|不能再提交/.test(bodyText) || !$('li[onclick*="addChoice"]').length) {
@@ -3141,87 +3367,37 @@
         if (!stem) return;
 
         const type = detectType($q, $q.text());
+        // 选项:必须"元素 / 字母 / 文本"三者一一对应。
+        // 2026 版里选项字母是打乱的(第一个 <li> 的 data 可能是 "C"),
+        // 若按位置算字母(65+i)会与提示词里的字母不一致 -> 点错选项还会"校验通过"。
+        // 故这里过滤空文本时同步过滤元素,并单独保存每个元素的真实字母。
         const optEls = pickOptionEls($q);
-        const options = optEls.map((el, i) => readOption(el, i)).filter((o) => o.text);
-        out.push({ type, stem, options, dom: this, optDoms: optEls, qid });
+        const pairs = optEls.map((el, i) => ({ el, o: readOption(el, i) })).filter((p) => p.o.text);
+        const options = pairs.map((p) => p.o);
+        const optDoms = pairs.map((p) => p.el);
+        const optLabels = pairs.map((p) => p.o.label);
+        out.push({ type, stem, options, dom: this, optDoms, optLabels, qid });
       });
       return out;
     }
 
-    /* ---------- Prompt 构建 ---------- */
-    // 解码成功就直接给明文 —— 以前那句"形近乱码请推断"是错误先验,会把模型带进瞎猜。
-    function buildPrompt(q) {
-      const typeName = { single: '单选题', multi: '多选题', judge: '判断题', blank: '填空题' }[q.type];
-      let p = `请回答下面这道${typeName}。\n题目:${q.stem}\n`;
-      const unknown = (q.decode && q.decode.unknown) || '';
-      if (unknown) {
-        p += `(个别字符未能还原:${unknown};若不影响理解请忽略,否则按上下文推断)\n`;
-      }
-      if (q.type === 'judge' && !q.options.length) {
-        p += 'A、正确\nB、错误\n';
-      } else if (q.options.length) {
-        p += q.options.map((o) => `${o.label}、${o.text}`).join('\n') + '\n';
-      }
-      if (q.type === 'blank') {
-        p += '要求:直接给出每个空的答案,多空用|分隔,不要任何解释。\n';
-      } else if (q.type === 'multi') {
-        p += '要求:这是多选题,只回复所有正确选项的字母(如 BCD),不要任何解释。\n';
-      } else {
-        p += '要求:只回复正确选项的字母(如 B),不要任何解释。\n';
-      }
-      return p;
-    }
-
-    /* ---------- 答案规范化:全角转半角,兼容 BCD / B,C,D / B、C、D / B C D / 带解释 ---------- */
-    function normalizeLetters(raw) {
-      if (!raw) return '';
-      // 全角字母转半角
-      let text = String(raw).replace(/[Ａ-Ｇａ-ｇ]/g, (c) => {
-        const code = c.charCodeAt(0);
-        return String.fromCharCode(code >= 0xFF41 ? code - 0xFF41 + 97 : code - 0xFF21 + 65);
-      }).toUpperCase();
-      const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
-      // 1) 从后往前找"纯答案行"(可带"答案:"前缀,只含字母与分隔符)
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const m = lines[i].match(/^(?:答案[:：是\s]*)?([A-G](?:[\s,，、;；·]*[A-G])*)[。.]?$/);
-        if (m) return m[1].replace(/[^A-G]/g, '');
-      }
-      // 2) 行尾答案: "...所以选 BCD" / "answer: BCD"
-      const tail = text.match(/([A-G](?:[\s,，、;；]*[A-G])+|\b[A-G]\b)\s*[。.]?\s*$/);
-      if (tail) return tail[1].replace(/[^A-G]/g, '');
-      // 3) 兜底:全文本字母去重排序(可能混入解释里的字母,仅保底)
-      return [...new Set(text.match(/[A-G]/g) || [])].sort().join('');
-    }
-
-    /* ---------- 答案解析 ---------- */
-    function parseAnswer(q, raw) {
-      const text = String(raw || '').trim();
-      if (q.type === 'blank') {
-        const parts = text.split(/[|｜]/).map((s) => s.trim()).filter(Boolean);
-        return parts.length
-          ? { ok: true, display: parts.join(' | '), blanks: parts, normalized: parts.join('|') }
-          : { ok: false, display: text.slice(0, 30), normalized: '' };
-      }
-      const norm = normalizeLetters(text);
-      if (!norm) return { ok: false, display: text.slice(0, 30), normalized: '' };
-      if (q.type === 'single' || q.type === 'judge') {
-        const letter = norm[0];
-        return { ok: true, display: letter, letters: [letter], normalized: letter };
-      }
-      // 多选:保留完整字母序列(排序规范化,填写用 includes 判断与顺序无关)
-      const sorted = norm.split('').sort().join('');
-      return { ok: true, display: sorted, letters: sorted.split(''), normalized: sorted };
-    }
-
     /* ---------- 填后校验:回读 DOM 勾选状态与意图比对 ---------- */
+    // 用元素自己的真实字母(提取时记下的 optLabels),不能用位置推算的 65+i:
+    // 2026 版选项字母是打乱的,按位置算会把"选中的项"报成另一个字母。
     function readCheckedLetters(q) {
       const letters = [];
       (q.optDoms || []).forEach((el, i) => {
         const input = $(el).find('input[type=radio],input[type=checkbox]').get(0);
         const checked = (input && input.checked) || el.getAttribute('aria-checked') === 'true';
-        if (checked) letters.push(String.fromCharCode(65 + i));
+        if (checked) letters.push(labelOf(q, i));
       });
       return letters.join('');
+    }
+
+    /** 第 i 个选项的真实字母 */
+    function labelOf(q, i) {
+      if (q.optLabels && q.optLabels[i]) return q.optLabels[i];
+      return String.fromCharCode(65 + i);
     }
 
     /* ---------- 自动勾选 ---------- */
@@ -3250,7 +3426,7 @@
         if (input) input.click(); else el.click();
       };
       (q.optDoms || []).forEach((el, i) => {
-        const letter = String.fromCharCode(65 + i);
+        const letter = labelOf(q, i);
         const want = (parsed.letters || []).includes(letter);
         const cur = isChecked(el);
         if (want && !cur) click(el);           // 该选未选 -> 选上
@@ -3276,6 +3452,665 @@
         parseAnswer, normalizeLetters,
       };
     } catch (_) { /* 暴露失败不影响主流程 */ }
+  }
+
+  /* ============================== practice-page =========================== */
+  // 随堂练习/课堂测验(mobilelearn 的 answerQuestion2 页):
+  //   - 独立 Vue2 应用,题目与作答状态都在 vm.questionList / vm.personAnswer 上
+  //   - 题型由 DOM class 决定:single-choice / multiple-choice / 填空 / 简答
+  //   - 该页无字体混淆,题干与选项都是明文
+  //   - 提交按钮 .submit-btn -> submitCheck():有未答题会弹 $.selectDialog 二次确认
+  function initPracticePage() {
+    const module = 'practice';
+    if (config.get('assist.quiz') === false) {
+      log.info(module, '答题助手已关闭,跳过');
+      report(module, 'disabled', '答题助手已关闭');
+      return;
+    }
+    report(module, 'start', '检测到随堂练习页面');
+    log.info(module, '随堂练习页面启动');
+
+    // 等题目渲染(题目数据由接口 quizDetail2 异步返回)
+    elmGetter.get(SELECTORS.practice.question, 20000).then(() => {
+      setTimeout(run, 600); // 给 Vue 一点渲染时间
+    }).catch(() => {
+      log.warn(module, '未检测到随堂练习题目(可能已结束或不在参与范围)');
+      report(module, 'idle', '未检测到题目');
+    });
+
+    /** 取页面 Vue 实例(读题目/作答状态的权威来源) */
+    function getVm() {
+      try {
+        const root = document.querySelector(SELECTORS.practice.root);
+        return (root && root.__vue__) || null;
+      } catch (e) { return null; }
+    }
+
+    async function run() {
+      if (!isEnabled()) return log.info(module, '总开关关闭,不执行答题');
+      // 页面可能在等待期间跳走(如已提交的测验会跳到批阅回看页),此时不再动手
+      if (!/\/page\/quiz\/stu\/answerquestion2/i.test(location.pathname)) {
+        log.info(module, '页面已跳转,不再操作');
+        report(module, 'idle', '页面已跳转');
+        return;
+      }
+
+      const vm = getVm();
+      // 参与范围校验:不在范围内时页面只给一个提示块,没有题目
+      if (vm && vm.hasAnswerPermission === 0) {
+        log.warn(module, '不在参与人员范围内,无法作答');
+        report(module, 'review', '不在参与人员范围内');
+        return;
+      }
+      // 活动已结束:页面会跳到 quizStudentQuestion(成绩/批阅回看页)
+      if (vm && vm.active && Number(vm.active.status) === 2) {
+        log.info(module, '活动已结束,不操作');
+        report(module, 'closed', '活动已结束');
+        return;
+      }
+
+      const questions = extractPracticeQuestions(vm);
+      if (!questions.length) {
+        log.warn(module, '题目提取失败');
+        report(module, 'error', '题目提取失败');
+        return;
+      }
+      log.info(module, `共 ${questions.length} 题,来源: 页面接口明文`);
+      report(module, 'extracted', `提取到 ${questions.length} 题`);
+
+      // 未配置 API Key:只提取不答题
+      if (!config.get('llm.api_key')) {
+        questions.forEach((q) => log.info(module, `题目${q.index}[${q.type}] ${q.stem.slice(0, 60)}`));
+        log.warn(module, '未配置 LLM API Key,仅完成题目提取。请在面板设置中填写。');
+        report(module, 'no-key', '未配置 API Key,仅提取题目');
+        return;
+      }
+
+      const activeId = (vm && vm.activeId) || '';
+      const sess = startAiSession({
+        sid: 'p' + String(activeId).replace(/[^0-9a-z]/gi, '').slice(0, 16),
+        workKey: String(activeId),
+        title: (vm && vm.active && vm.active.name) || '随堂练习',
+        questions,
+        source: '页面接口明文',
+        submitState: config.get('quiz.auto_submit_practice') ? 'wait' : 'off',
+      });
+      const aiMeta = sess.aiMeta;
+      const metaWrite = sess.metaWrite;
+      const convs = sess.convs;
+      const writer = sess.writer;
+
+      let failStreak = 0;
+      let stopped = false;
+      const stats = { ok: 0, failed: [] };
+
+      const answerOne = async (q) => {
+        if (stopped || !isEnabled()) return;
+        const c = convs[q.index - 1];
+        setPracticeBadge(q, '思考中…', 'thinking');
+        if (!aiMeta.answeredAt) { aiMeta.answeredAt = Date.now(); metaWrite(); }
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          c.attempt = attempt;
+          c.phase = 'requesting';
+          c.prompt = buildPrompt(q);
+          c.params = {
+            model: aiMeta.model,
+            temperature: 0.1,
+            effort: aiMeta.effort,
+            stream: config.get('llm.stream') !== false,
+          };
+          c.thinking = '';
+          c.answer = '';
+          c.error = null;
+          c.result = null;
+          c.t = c.t || {};
+          c.t.reqAt = Date.now();
+          c.t.firstThinkAt = 0;
+          c.t.firstAnswerAt = 0;
+          c.t.doneAt = 0;
+          writer(q.index).write(convSnapshot(c), true);
+          try {
+            // 主观题可能带图片(如"给出下表的范式分析"),纯文本看不到图,改走多模态
+            let st = null;
+            if (q.type === 'subjective' && q.images && q.images.length && config.get('llm.vision') !== false) {
+              const png = await fetchImageDataUrl(q.images[0]);
+              if (png) {
+                log.info(module, `题目${q.index} 含图片,走多模态作答`);
+                const txt = await llm.vision(c.prompt, png);
+                st = { thinking: '', answer: txt, usage: null, streamed: false };
+              }
+            }
+            if (!st) {
+              st = await llm.stream(c.prompt, {
+                onThinking: (text, s) => {
+                  c.phase = 'thinking';
+                  c.thinking = s.thinking;
+                  if (!c.t.firstThinkAt) c.t.firstThinkAt = Date.now();
+                  writer(q.index).write(convSnapshot(c));
+                },
+                onAnswer: (text, s) => {
+                  c.phase = 'answering';
+                  c.answer = s.answer;
+                  c.streamed = s.streamed !== false;
+                  if (!c.t.firstAnswerAt) c.t.firstAnswerAt = Date.now();
+                  writer(q.index).write(convSnapshot(c));
+                },
+              }).promise;
+            }
+            c.thinking = st.thinking;
+            c.answer = st.answer;
+            c.usage = st.usage || null;
+            c.streamed = st.streamed !== false;
+            c.t.doneAt = Date.now();
+            failStreak = 0;
+            const parsed = parseAnswer(q, st.answer);
+            c.result = {
+              display: parsed.display, normalized: parsed.normalized,
+              letters: parsed.letters || [], ok: parsed.ok, fillOk: false, verifyOk: null,
+            };
+            log.info(module, `题目${q.index}[${q.type}] 原始回答: ${String(st.answer).replace(/\s+/g, ' ').slice(0, 80)} → 规范化: ${parsed.normalized || '(无)'}`);
+            if (!parsed.ok) {
+              setPracticeBadge(q, `AI: ${parsed.display}`, 'bad');
+              stats.failed.push(q.index);
+              c.phase = 'failed';
+              c.error = {
+                message: '回答无法解析成答案',
+                hint: '原始回答: ' + String(st.answer).replace(/\s+/g, ' ').slice(0, 80),
+              };
+              writer(q.index).write(convSnapshot(c), true);
+              aiMeta.failed += 1;
+              metaWrite();
+              log.warn(module, `题目${q.index} 解析失败,未作答`);
+              return;
+            }
+            // 复核策略按题型分:
+            //  - 选择/多选/填空:再答一次,要求规范化结果一致(客观题,字符串比较就是对的)
+            //  - 主观题:两次作答本来就可能措辞不同,甚至给出不同但都成立的解法。
+            //    强行要求两次一致,结果就是主观题几乎永远"存疑"而永远填不上。
+            //    改成"让模型自评这一份答案是否正确且完整",只有被否才跳过。
+            const isSubjective = q.type === 'subjective';
+            const needDouble = config.get('quiz.double_check') && !isSubjective && (
+              q.type === 'multi' || q.type === 'blank'
+            );
+            if (needDouble) {
+              setPracticeBadge(q, `复核中(${parsed.display})…`, 'thinking');
+              c.phase = 'rechecking';
+              writer(q.index).write(convSnapshot(c));
+              const st2 = await llm.stream(c.prompt, {
+                onThinking: () => {}, onAnswer: () => {},
+              }).promise;
+              const parsed2 = parseAnswer(q, st2.answer);
+              const consistent = parsed2.ok && parsed2.normalized === parsed.normalized;
+              c.recheck = {
+                answer: st2.answer, normalized: parsed2.normalized,
+                ok: parsed2.ok, consistent,
+              };
+              log.info(module, `题目${q.index} 复核回答: ${String(st2.answer).replace(/\s+/g, ' ').slice(0, 80)} → 规范化: ${parsed2.normalized || '(无)'}`);
+              if (!parsed2.ok || !consistent) {
+                setPracticeBadge(q, `存疑: ${parsed.display}/${parsed2.ok ? parsed2.display : '?'}`, 'doubt');
+                log.warn(module, `题目${q.index} 两次作答不一致(${parsed.normalized} vs ${parsed2.normalized || '解析失败'}),跳过不填,请人工定夺`);
+                stats.failed.push(q.index);
+                c.phase = 'failed';
+                c.error = {
+                  message: `两次作答不一致(${parsed.normalized} vs ${parsed2.normalized || '解析失败'})`,
+                  hint: '模型对本题把握不定,已跳过不填。请人工核对后自行选择。',
+                };
+                writer(q.index).write(convSnapshot(c), true);
+                aiMeta.failed += 1;
+                metaWrite();
+                return;
+              }
+            } else if (isSubjective && config.get('quiz.double_check')) {
+              // 主观题:单独做一次自评,只在这一步拦人
+              setPracticeBadge(q, `自评中(${parsed.display})…`, 'thinking');
+              c.phase = 'rechecking';
+              writer(q.index).write(convSnapshot(c));
+              let judged = '';
+              try {
+                const judgePrompt =
+                  '下面是对一道题的回答。请判断它是否正确且完整地回答了题目。'
+                  + '只要结论正确、要点齐全就算通过,措辞风格不影响。\n'
+                  + '只回复"通过"或"不通过"三个字,不要其它内容。\n\n'
+                  + `题目:\n${String(q.stem || '').slice(0, 1500)}\n\n`
+                  + `回答:\n${String(parsed.normalized || '').slice(0, 2500)}`;
+                // 题干带图时,自评也要看图,否则模型无法判断"图里的表"答对了没有
+                let png = null;
+                if (q.images && q.images.length && config.get('llm.vision') !== false) {
+                  png = await fetchImageDataUrl(q.images[0]);
+                }
+                judged = png
+                  ? await llm.vision(judgePrompt, png)
+                  : await llm.chat(judgePrompt);
+              } catch (e) {
+                log.warn(module, `题目${q.index} 自评调用失败: ${e.message}`);
+              }
+              const j = String(judged || '').replace(/\s+/g, '');
+              const passed = /通过/.test(j) && !/不通过/.test(j);
+              c.recheck = { judged: j.slice(0, 10), consistent: passed };
+              log.info(module, `题目${q.index} 主观题自评:${j.slice(0, 10)}(${passed ? '通过' : '不通过'})`);
+              if (judged && !passed) {
+                setPracticeBadge(q, `自评不通过(${parsed.display})`, 'doubt');
+                log.warn(module, `题目${q.index} 主观题自评不通过,跳过不填,请人工定夺`);
+                stats.failed.push(q.index);
+                c.phase = 'failed';
+                c.error = {
+                  message: '主观题自评不通过',
+                  hint: '模型对本题把握不定,已跳过不填。请人工核对后自行填写。',
+                };
+                writer(q.index).write(convSnapshot(c), true);
+                aiMeta.failed += 1;
+                metaWrite();
+                return;
+              }
+            }
+            setPracticeBadge(q, `AI: ${parsed.display}`, 'ok');
+            if (config.get('quiz.auto_fill')) {
+              // 闸口:已提交/批阅页只读,禁止填写
+              const bt = (document.body && document.body.innerText) || '';
+              if (/My Answer|我的答案|正确答案|批阅|查看答案|查看解析|得分/i.test(bt)) {
+                log.warn(module, `题目${q.index} 检测到批阅/查看页特征,拒绝点击填写`);
+                report(module, 'review', '批阅页特征,已停止填写');
+                stats.failed.push(q.index);
+                c.phase = 'failed';
+                c.error = { message: '批阅/查看页特征,拒绝点击', hint: '该页不允许作答,脚本未做任何点击' };
+                writer(q.index).write(convSnapshot(c), true);
+                aiMeta.failed += 1;
+                metaWrite();
+                return;
+              }
+              const filled = fillPracticeAnswer(q, parsed);
+              c.result.fillOk = filled.ok;
+              if (!filled.ok) {
+                setPracticeBadge(q, `AI: ${parsed.display}(填写失败)`, 'bad');
+                stats.failed.push(q.index);
+                c.phase = 'failed';
+                c.error = { message: filled.message || '填写失败', hint: '本题未作答,请人工处理' };
+                writer(q.index).write(convSnapshot(c), true);
+                aiMeta.failed += 1;
+                metaWrite();
+                return;
+              }
+              // 填后校验:回读平台状态与意图比对。
+              // 比较必须在同一个取值空间里:判断题模型的答案是 A/B,而平台存的是 "1"/"2",
+              // 直接比会误判成"没填上"。
+              const actual = readPracticeAnswer(q);
+              const expect = (q.type === 'blank')
+                ? (parsed.blanks || []).join('|')
+                : (q.type === 'subjective'
+                  ? parsed.normalized
+                  : platformValuesOf(q, parsed.letters || []).join(''));
+              c.result.verifyOk = (actual === expect);
+              log.info(module, `题目${q.index} 填写校验: 意图=${expect} 实际=${actual}${actual === expect ? ' ✓' : ' ✗'}`);
+              if (!c.result.verifyOk) {
+                setPracticeBadge(q, `AI: ${parsed.display}(填写异常)`, 'bad');
+                stats.failed.push(q.index);
+                c.phase = 'failed';
+                c.error = {
+                  message: `填写与解析不一致(意图 ${expect},实际 ${actual})`,
+                  hint: '本题不参与自动提交,请人工确认',
+                };
+                writer(q.index).write(convSnapshot(c), true);
+                aiMeta.failed += 1;
+                metaWrite();
+                return;
+              }
+            }
+            stats.ok += 1;
+            c.phase = 'filled';
+            writer(q.index).write(convSnapshot(c), true);
+            aiMeta.answered += 1;
+            metaWrite();
+            return;
+          } catch (e) {
+            c.phase = 'failed';
+            c.error = { message: e.message, hint: attempt < 2 ? '自动重试一次' : '本题放弃' };
+            writer(q.index).write(convSnapshot(c), true);
+            log.warn(module, `题目${q.index} 第${attempt}次调用失败: ${e.message}`);
+          }
+        }
+        failStreak++;
+        stats.failed.push(q.index);
+        setPracticeBadge(q, '失败', 'bad');
+        aiMeta.failed += 1;
+        metaWrite();
+        if (failStreak >= 3) {
+          stopped = true;
+          log.error(module, '连续 3 题失败,暂停答题。请检查 LLM 配置。');
+          report(module, 'error', 'LLM 连续失败,已暂停');
+        }
+      };
+
+      const queue = [...questions];
+      const worker = async () => {
+        while (queue.length && !stopped) {
+          const q = queue.shift();
+          if (!q) continue;
+          await answerOne(q);
+        }
+      };
+      await Promise.all([worker(), worker()]);
+
+      if (stopped) return;
+
+      // 无论开没开自动提交,都挂一个菜单入口,免得用户找不到提交按钮
+      try {
+        GM_registerMenuCommand('AutoCX: 提交本次随堂练习', () => {
+          report(module, 'manual-submit', '用户从菜单触发提交');
+          submitPractice(vm);
+        });
+      } catch (e) { log.debug(module, '注册提交菜单失败: ' + e.message); }
+
+      if (config.get('quiz.auto_submit_practice')) {
+        if (stats.failed.length === 0 && stats.ok === questions.length) {
+          aiMeta.answered = stats.ok;
+          sess.aiMeta.events.push({ ts: Date.now(), text: '全部题目已作答,准备自动提交' });
+          metaWrite();
+          submitPractice(vm);
+        } else {
+          const why = [];
+          if (stats.failed.length) why.push(`${stats.failed.length} 题未答(题号 ${stats.failed.join(',')})`);
+          const detail = why.join('、');
+          log.warn(module, `${detail},不自动提交;需要提交可从脚本菜单「提交本次随堂练习」手动触发。`);
+          report(module, 'filled', `${stats.ok}/${questions.length} 已答,${detail}`);
+          sess.aiMeta.events.push({ ts: Date.now(), text: `${detail},不自动提交(可从脚本菜单手动提交)` });
+          metaWrite();
+        }
+      } else {
+        // 随堂练习在 isAutoSubmit=1 时由平台在截止时自动提交,这里默认只填不交
+        const reason = '自动提交已关闭(quiz.auto_submit_practice)';
+        log.info(module, `答题流程结束:${reason}。请核对后提交,或从脚本菜单「提交本次随堂练习」触发。`);
+        report(module, 'filled', `${stats.ok}/${questions.length} 已答,等待人工核对提交`);
+        sess.aiMeta.events.push({ ts: Date.now(), text: `${stats.ok}/${questions.length} 已答。${reason},请人工核对后提交` });
+        metaWrite();
+      }
+    }
+
+    /**
+     * 平台公共图片(取原图而非缩略图)转成 data URL,供多模态使用。
+     * 图片在 p.cldisk.com,跨域但带 Access-Control-Allow-Origin,可直接 fetch。
+     */
+    async function fetchImageDataUrl(url) {
+      try {
+        const r = await fetch(url, { credentials: 'omit' });
+        if (!r.ok) return null;
+        const blob = await r.blob();
+        if (!/^image\//.test(blob.type || '')) return null;
+        return await new Promise((resolve) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(String(fr.result || ''));
+          fr.onerror = () => resolve(null);
+          fr.readAsDataURL(blob);
+        });
+      } catch (e) {
+        log.debug(module, '图片读取失败: ' + e.message);
+        return null;
+      }
+    }
+
+    /**
+     * 解析平台的多选作答字符串成字母集合。
+     * 平台有两种格式:选项名全是字母时用字母串("AB"),否则用逗号串("A,B")。
+     */
+    function parseMultiSet(str) {
+      const s = String(str || '').trim();
+      if (!s) return new Set();
+      const parts = /^[A-Za-z]+$/.test(s) ? s.split('') : s.split(',');
+      return new Set(parts.map((x) => x.trim()).filter(Boolean));
+    }
+
+    /** 提取题目:DOM 取结构与选项,Vue 实例取题型/答案状态(双源) */
+    function extractPracticeQuestions(vm) {
+      const items = Array.from(document.querySelectorAll(SELECTORS.practice.question));
+      const out = [];
+      items.forEach((el, i) => {
+        const vmq = (vm && vm.questionList && vm.questionList[i]) || null;
+        const stemEl = el.querySelector(SELECTORS.practice.stem);
+        const stem = htmlToText(stemEl ? stemEl.textContent : '');
+        if (!stem) return;
+
+        // 题型:优先看 Vue 的 type(平台权威),DOM class 只作补充。
+        // 注意 DOM class 不可靠:判断题(type 3/16)复用的也是 "single-choice",
+        // 单选(type 0)与判断(type 3/16)光看 class 分不开,必须看 type。
+        const cls = String(el.className || '');
+        const vtype = vmq ? Number(vmq.type) : null;
+        let type = 'single';
+        if (vtype === 1) type = 'multi';
+        else if (vtype === 2 || vtype === 9 || vtype === 10) type = 'blank';
+        else if (vtype === 3 || vtype === 16) type = 'judge';
+        else if (vtype === 4 || vtype === 5 || vtype === 6 || vtype === 7 || vtype === 18) type = 'subjective';
+        else if (cls.indexOf('multiple-choice') >= 0) type = 'multi';
+        else if (el.querySelector(SELECTORS.practice.blankInput)) type = 'blank';
+        else if (el.querySelector(SELECTORS.practice.shortInput)) type = 'subjective';
+
+        // 选项:DOM 的 .option-letter 是平台自己的字母,顺序与 vm 一致。
+        // 字母取不到时退回 Vue 的 que.answer[k].name,再不行才按位置推 ——
+        // 绝不能只按位置推(章节测验页的选项字母是打乱的)。
+        //
+        // 判断题(type 3/16)是个坑:平台的选项名是 "1"/"2"(内容"对"/"错"),不是 A/B。
+        // 这里统一把展示给模型的字母改成 A/B,并用 value 记住平台真实取值,填的时候再映射回去。
+        const optEls = Array.from(el.querySelectorAll(SELECTORS.practice.option));
+        const opts = optEls.map((oe, k) => {
+          const le = oe.querySelector(SELECTORS.practice.optionLetter);
+          const te = oe.querySelector(SELECTORS.practice.optionText);
+          const vmAns = (vmq && vmq.answer && vmq.answer[k]) || null;
+          const rawName = (le && le.textContent || '').trim()
+            || (vmAns && vmAns.name ? String(vmAns.name).trim() : '')
+            || String.fromCharCode(65 + k);
+          const isLetter = /^[A-Z]$/.test(rawName);
+          const label = isLetter ? rawName : String.fromCharCode(65 + k);
+          const text = htmlToText(te ? te.textContent : (vmAns ? vmAns.content : ''));
+          return {
+            el: oe,
+            label,          // 展示给模型的字母
+            value: rawName, // 平台真实取值(判断题是 "1"/"2")
+            text,
+          };
+        }).filter((o) => o.text || o.label);
+
+        // 题干/附件里的图片(主观题常见)。
+        // 平台模板里图片不在题干 HTML 中,而是单独渲染在 .attach-img-list 里:
+        //   <img :src=".../star3/100_100c/<id>.png" data-orignal=".../star3/origin/<id>.jpg">
+        // 缩略图 100_100c 分辨率太低,多模态看不清表格,所以优先取 data-orignal 原图。
+        const images = [];
+        const pushImg = (u) => {
+          if (!u) return;
+          const s = String(u);
+          if (!/^https?:/i.test(s)) return;
+          if (images.indexOf(s) < 0 && images.length < 3) images.push(s);
+        };
+        el.querySelectorAll('.attach-img-list img').forEach((im) => {
+          // 选项里的图不算题干图(选项图片在 .option-list 内)
+          if (im.closest('.option-list')) return;
+          pushImg(im.getAttribute('data-orignal') || im.getAttribute('data-original') || im.getAttribute('src'));
+        });
+        const stemHtml = (vmq && vmq.content) || (stemEl ? stemEl.innerHTML : '');
+        const imgRe = /<img[^>]+src=["']([^"']+)["']/gi;
+        let im2;
+        while ((im2 = imgRe.exec(String(stemHtml))) && images.length < 3) {
+          pushImg(im2[1].replace('/star3/100_100c/', '/star3/origin/'));
+        }
+
+        out.push({
+          index: out.length + 1,
+          // vueIndex: 本题在 vm.questionList 里的下标。
+          // 不能用 index-1 反推 —— 若某题题干为空会被跳过,index 就与 questionList 错位,
+          // 那样读写 personAnswer 会落到别的题上。
+          vueIndex: i,
+          type,
+          stem,
+          options: opts.map((o) => ({ label: o.label, text: o.text })),
+          optEls: opts.map((o) => o.el),
+          optLabels: opts.map((o) => o.label),
+          // 平台真实取值(判断题是 "1"/"2",多选/单选是字母)
+          optValues: opts.map((o) => o.value),
+          // 多选题的平台限制(如"至少2项最多4项"),提交时平台会校验
+          limits: (vmq && vmq.answerLimitMap) ? {
+            min: Number(vmq.answerLimitMap.min || 0),
+            max: Number(vmq.answerLimitMap.max || 0),
+          } : null,
+          dom: el,
+          vmq,
+          images,
+          blankCount: el.querySelectorAll(SELECTORS.practice.blankInput).length,
+          decode: null,
+          grade: 'A',
+        });
+      });
+      return out;
+    }
+
+    /** 取本题在 vm.questionList 里的对象(用 vueIndex,不靠 index 反推) */
+    function vmQuestion(q) {
+      const vm = getVm();
+      const list = (vm && vm.questionList) || [];
+      const i = (typeof q.vueIndex === 'number') ? q.vueIndex : (q.index - 1);
+      return list[i] || q.vmq || null;
+    }
+
+    /**
+     * 填写答案:一律走"点 DOM"的方式,让平台自己的处理函数去改状态。
+     * 直接改 Vue 数据虽然快,但会绕过平台格式(如多选的字母串/逗号串),容易出现"填了但没生效"。
+     */
+    function fillPracticeAnswer(q, parsed) {
+      const vmq = vmQuestion(q);
+      if (!vmq) return { ok: false, message: '题目数据缺失' };
+      const pa = vmq.personAnswer || {};
+
+      if (q.type === 'blank') {
+        const inputs = q.dom.querySelectorAll(SELECTORS.practice.blankInput);
+        const parts = parsed.blanks || [];
+        if (!inputs.length) return { ok: false, message: '未找到填空框' };
+        if (parts.length !== inputs.length) {
+          return { ok: false, message: `填空数量不符(模型给 ${parts.length} 个,题目需 ${inputs.length} 个)` };
+        }
+        inputs.forEach((el, i) => {
+          el.value = parts[i];
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        return { ok: true };
+      }
+
+      if (q.type === 'subjective') {
+        const ta = q.dom.querySelector(SELECTORS.practice.shortInput);
+        if (!ta) return { ok: false, message: '未找到简答输入框' };
+        const text = parsed.text || parsed.display || '';
+        if (!text) return { ok: false, message: '未生成简答内容' };
+        ta.value = text;
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true };
+      }
+
+      // 选择/判断/多选:点选项 li(平台自己的处理函数负责改状态)
+      const want = new Set(parsed.letters || []);
+      if (!want.size) return { ok: false, message: '未解析出选项字母' };
+      if (q.type === 'multi') {
+        // 多选是"切换"语义:先算出与目标的差集,只点需要改的项。
+        // 平台的 myoption 存的是平台自己的选项名(判断题是 "1"/"2",多选是字母)。
+        const lim = q.limits || null;
+        if (lim && lim.max > 0 && want.size > lim.max) {
+          return { ok: false, message: `选了 ${want.size} 项,超过平台上限 ${lim.max} 项` };
+        }
+        if (lim && lim.min > 0 && want.size < lim.min) {
+          return { ok: false, message: `选了 ${want.size} 项,少于平台下限 ${lim.min} 项` };
+        }
+        const cur = new Set(parseMultiSet(pa.myoption));
+        q.optEls.forEach((el, k) => {
+          const v = q.optValues[k];
+          const shouldHave = want.has(q.optLabels[k]);
+          const has = cur.has(v);
+          if (shouldHave !== has) el.click();
+        });
+        return { ok: true };
+      }
+      const idx = q.optLabels.findIndex((L) => want.has(L));
+      if (idx < 0) return { ok: false, message: `选项 ${Array.from(want).join('')} 不在题目选项中` };
+      q.optEls[idx].click();
+      return { ok: true };
+    }
+
+    /** 把"展示给模型的字母"换成"平台真实取值"(判断题 A→"1") */
+    function platformValuesOf(q, letters) {
+      return letters.map((L) => {
+        const i = (q.optLabels || []).indexOf(L);
+        if (i < 0) return L;
+        return (q.optValues && q.optValues[i]) || L;
+      }).sort();
+    }
+
+    /** 回读平台作答状态,与意图比对 */
+    function readPracticeAnswer(q) {
+      const vmq = vmQuestion(q);
+      if (!vmq || !vmq.personAnswer) return '';
+      const pa = vmq.personAnswer;
+      if (q.type === 'blank') {
+        const arr = pa.blankAnswer || [];
+        return arr.map((b) => String((b && b.content) || '').trim()).join('|');
+      }
+      if (q.type === 'subjective') return String(pa.content || '').trim();
+      // 多选:平台存的是字母串(判断题是 "1,2"),统一解析成集合再排序
+      return Array.from(parseMultiSet(pa.myoption)).sort().join('');
+    }
+
+    /** 题目标记 */
+    function setPracticeBadge(q, text, state) {
+      if (!q.dom) return;
+      let b = q.dom.querySelector('.autocx-badge');
+      if (!b) {
+        b = document.createElement('span');
+        b.className = 'autocx-badge';
+        b.style.cssText = 'margin-left:8px;padding:1px 6px;border-radius:3px;font-size:12px;';
+        const host = q.dom.querySelector(SELECTORS.practice.title) || q.dom;
+        host.appendChild(b);
+      }
+      const colors = { thinking: '#63b4ff', ok: '#21d181', bad: '#ff4d4f', doubt: '#f59e0b' };
+      b.textContent = text;
+      b.style.background = colors[state] || '#999';
+      b.style.color = '#fff';
+    }
+
+    /** 提交:点 .submit-btn,若平台弹二次确认框则点确认 */
+    async function submitPractice(vm) {
+      const btn = document.querySelector(SELECTORS.practice.submit);
+      if (!btn) {
+        log.warn(module, '未找到提交按钮(可能已提交或活动已结束)');
+        report(module, 'review', '未找到提交按钮');
+        return;
+      }
+      log.info(module, '点击提交按钮…');
+      report(module, 'submitting', '正在提交');
+      btn.click();
+      // 平台弹确认框(有未答题时)需要再点一次确认
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 300));
+        const ok = document.querySelector(SELECTORS.practice.submitConfirm);
+        if (ok) {
+          const t = (ok.textContent || '').trim();
+          // 只点"确定/提交"类按钮,取消类一律不点
+          if (/^(Submit|OK|Ok|ok|确定|确认|提交)$/.test(t)) {
+            log.info(module, `点击确认弹窗 ${t}`);
+            ok.click();
+          } else {
+            log.warn(module, `确认弹窗按钮为「${t}」,不自动确认`);
+            report(module, 'review', '提交需人工确认');
+            return;
+          }
+          break;
+        }
+      }
+      // 等平台结果:提交成功后 .submit-btn 会消失(active.status 变 2)
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 400));
+        if (!document.querySelector(SELECTORS.practice.submit)) {
+          log.info(module, '随堂练习提交成功 ✅');
+          report(module, 'submitted', '提交成功');
+          return;
+        }
+      }
+      log.warn(module, '提交结果未确认,请检查页面');
+      report(module, 'error', '提交结果未确认');
+    }
   }
 
   /* ============================== 通用:反后台节流 ========================= */
@@ -3527,6 +4362,13 @@
         try { AIW.ensure(); } catch (e) { log.warn('ai', '挂载作答记录失败: ' + e.message); }
       }
       initQuizPage();
+      break;
+    case 'practice':
+      // 随堂练习页自带 Vue2,作答记录窗口用我们自己的 Vue3 挂载
+      if (window.top === window.self) {
+        try { AIW.ensure(); } catch (e) { log.warn('ai', '挂载作答记录失败: ' + e.message); }
+      }
+      initPracticePage();
       break;
   }
 
