@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      1.0.11
+// @version      1.0.12
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验/作业/随堂练习答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -1474,7 +1474,8 @@
 /* ============================== 悬浮面板(Vue) ============================= */
   // 只在 top 帧渲染;通过 GM_addValueChangeListener 聚合各任务帧的日志/状态。
   // 视觉:批注纸(纸白 + 墨 + 红笔),收起为右缘书签。
-  function initTopPanel() {
+  function initTopPanel(opts) {
+    const o = opts || {};
     const V = VUE3 || ((typeof window !== 'undefined' && window.Vue && window.Vue.createApp) ? window.Vue : null);
     const A = ANTD || ((typeof window !== 'undefined' && window.antd) ? window.antd : (typeof antd !== 'undefined' ? antd : null));
     if (!V || !V.createApp) {
@@ -1491,7 +1492,7 @@
       mount.id = 'autocx-vue-root';
       (body || document.body).appendChild(mount);
       try { if (typeof unsafeWindow !== 'undefined' && !unsafeWindow.Vue) unsafeWindow.Vue = V; } catch (_) { /* 忽略 */ }
-      const app = V.createApp(createPanelRoot(V));
+      const app = V.createApp(createPanelRoot(V, o));
       app.use(A);
       app.mount(mount);
       log.info('panel', '悬浮面板已加载');
@@ -1738,12 +1739,15 @@
     'quiz.auto_submit_work', 'quiz.auto_submit_practice', 'quiz.auto_submit_exam', 'llm.vision', 'font.refdb_url', 'doc.interval', 'debug',
   ];
 
-  function createPanelRoot(VueLib) {
+  function createPanelRoot(VueLib, opts) {
+    const o = opts || {};
     return {
       template: PANEL_TEMPLATE,
       setup() {
         const { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } = VueLib;
-        const panelOpen = ref(true);
+        // 默认展开;考试/随堂练习这类"整页专注"的页面传 collapsed:true,
+        // 只在右缘留一个小书签,免得 400x610 的面板盖住题目区。
+        const panelOpen = ref(!o.collapsed);
         const activeTab = ref('status');
         const enabled = ref(isEnabled());
         const assistVideo = ref(config.get('assist.video') !== false);
@@ -5042,44 +5046,49 @@
   }
   log.info('bootstrap', `角色识别: ${role} @ ${location.hostname}${location.pathname}`);
 
+  /** 暴露调试钩子(控制台可调):任何挂了本脚本的顶层页面都能用 */
+  function exposeDebugHooks() {
+    try {
+      const pw = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+      pw.__autocxAI = {
+        open: () => AIW.ensure().open(),
+        close: () => { if (AIW.api) AIW.api.close(); },
+        index: () => GM_getValue(AI_INDEX) || [],
+        // 当前生效的开关(排查"为什么自动提交了"这类问题用)
+        cfg: () => {
+          const o = {};
+          PANEL_SETTING_KEYS.forEach((k) => {
+            let v = config.get(k);
+            // API Key 只回显末 4 位
+            if (k === 'llm.api_key') v = '***' + String(v || '').slice(-4);
+            o[k] = v;
+          });
+          return o;
+        },
+        demo: () => { const sid = seedDemo(); AIW.ensure().open(); return sid; },
+        clear: (sid) => {
+          const target = sid || 'demo';
+          let idx = [];
+          try { idx = GM_getValue(AI_INDEX) || []; } catch (_) { idx = []; }
+          if (!Array.isArray(idx)) idx = [];
+          const item = idx.find((it) => it && it.sid === target);
+          aibus.drop(target, item ? item.count : 12);
+          try { GM_deleteValue(AI_S(target)); } catch (_) { /* 忽略 */ }
+          try { GM_deleteValue(AI_PING); } catch (_) { /* 忽略 */ }
+          aibus.put(AI_INDEX, idx.filter((it) => it && it.sid !== target));
+          return 'cleared:' + target;
+        },
+      };
+    } catch (e) { log.debug('ai', '调试钩子暴露失败: ' + e.message); }
+  }
+
   switch (role) {
     case 'top':
       spoofVisibility(); // 顶层页是 mouseout 防挂机检测所在帧
       initTopPanel();
       initTopAdvance();
       // 调试钩子(与 __autocxQuiz 同一约定):离线核对窗口界面,不影响正常流程
-      try {
-        const pw = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-        pw.__autocxAI = {
-          open: () => AIW.ensure().open(),
-          close: () => { if (AIW.api) AIW.api.close(); },
-          index: () => GM_getValue(AI_INDEX) || [],
-          // 当前生效的开关(排查"为什么自动提交了"这类问题用)
-          cfg: () => {
-            const o = {};
-            PANEL_SETTING_KEYS.forEach((k) => {
-              let v = config.get(k);
-              // API Key 只回显末 4 位
-              if (k === 'llm.api_key') v = '***' + String(v || '').slice(-4);
-              o[k] = v;
-            });
-            return o;
-          },
-          demo: () => { const sid = seedDemo(); AIW.ensure().open(); return sid; },
-          clear: (sid) => {
-            const target = sid || 'demo';
-            let idx = [];
-            try { idx = GM_getValue(AI_INDEX) || []; } catch (_) { idx = []; }
-            if (!Array.isArray(idx)) idx = [];
-            const item = idx.find((it) => it && it.sid === target);
-            aibus.drop(target, item ? item.count : 12);
-            try { GM_deleteValue(AI_S(target)); } catch (_) { /* 忽略 */ }
-            try { GM_deleteValue(AI_PING); } catch (_) { /* 忽略 */ }
-            aibus.put(AI_INDEX, idx.filter((it) => it && it.sid !== target));
-            return 'cleared:' + target;
-          },
-        };
-      } catch (e) { log.debug('ai', '调试钩子暴露失败: ' + e.message); }
+      exposeDebugHooks();
       break;
     case 'knowledge':
       initKnowledgeFrame();
@@ -5102,6 +5111,11 @@
     case 'practice':
       // 随堂练习页自带 Vue2,作答记录窗口用我们自己的 Vue3 挂载
       if (window.top === window.self) {
+        // 随堂练习常是整页跳转过来的,课程页那层框架已经没了,
+        // 所以这里自己把悬浮面板挂上,否则用户在这个页面上看不到任何界面。
+        // 默认只留右缘书签(collapsed),别用 400x610 的面板盖住题目区。
+        initTopPanel({ collapsed: true });
+        exposeDebugHooks();
         try { AIW.ensure(); } catch (e) { log.warn('ai', '挂载作答记录失败: ' + e.message); }
       }
       initPracticePage();
@@ -5109,6 +5123,13 @@
     case 'exam':
       // 考试页自带 jQuery(没有 Vue),作答记录窗口用我们自己的 Vue3 挂载
       if (window.top === window.self) {
+        // 考试是独立整页,课程页那层框架不在了 -> 自己挂悬浮面板,
+        // 让用户能看到答题进度、日志、开关,以及作答记录窗口。
+        // 默认只留右缘书签(collapsed),别用 400x610 的面板盖住右侧的题号导航。
+        // 注意:这里**不**调 spoofVisibility() —— 考试页伪装可见性
+        // 等于对切屏检测撒谎,不做这种事。
+        initTopPanel({ collapsed: true });
+        exposeDebugHooks();
         try { AIW.ensure(); } catch (e) { log.warn('ai', '挂载作答记录失败: ' + e.message); }
       }
       initExamPage();
