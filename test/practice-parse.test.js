@@ -146,5 +146,88 @@ for (const [data, disp, i, expLabel, expValue] of letterCases) {
   ok ? pass++ : fail++;
 }
 
+// ---- matchOptionByText:模型不按字母答时,按选项文案反查字母 ----
+// 判断题选项文案各平台不一:对/错、正确/错误、True/False
+eval(extractFn('matchOptionByText'));
+const judgeOpts = [
+  { label: 'A', text: 'True' },
+  { label: 'B', text: 'False' },
+];
+const cnJudgeOpts = [
+  { label: 'A', text: '对' },
+  { label: 'B', text: '错' },
+];
+const matchCases = [
+  [judgeOpts, 'True', 'A'],
+  [judgeOpts, 'true', 'A'],
+  [judgeOpts, 'False', 'B'],
+  [judgeOpts, '正确', 'A'],
+  [judgeOpts, '错误', 'B'],
+  [judgeOpts, '对的', 'A'],
+  [judgeOpts, '不对', 'B'],
+  [cnJudgeOpts, '正确', 'A'],
+  [cnJudgeOpts, '错误', 'B'],
+  [cnJudgeOpts, '对', 'A'],
+  [cnJudgeOpts, '错', 'B'],
+  [judgeOpts, '完全无关的话', ''],
+];
+for (const [opts, raw, expect] of matchCases) {
+  const got = matchOptionByText(opts, raw);
+  const ok = got === expect;
+  console.log(`${ok ? 'PASS' : 'FAIL'} matchOptionByText(${JSON.stringify(raw)}) → ${JSON.stringify(got)} (期望 ${JSON.stringify(expect)})`);
+  ok ? pass++ : fail++;
+}
+
+// ---- 考试页多选:平台按页面顺序拼接取值,比较时必须按取值集合比 ----
+// 平台 addMultipleChoice 是按选项在页面上的顺序把 data 值首尾相接,
+// 所以模型选 ACD、页面存的是 "BDC"(同样三个取值,顺序可能不同)。
+// 旧实现拿排序后的期望值去比没排序的实际值 -> 内容对却判成没填上 -> 整卷拒交。
+function examValueOf(optLabels, optValues, label) {
+  const i = optLabels.indexOf(label);
+  if (i < 0) return label;
+  return optValues[i] || label;
+}
+// 与脚本里 splitExamValues 同实现:按已知取值集合贪心前缀匹配拆分
+function splitExamValues(str, values) {
+  const s = String(str || '');
+  const pool = (values || []).filter(Boolean).slice().sort((a, b) => b.length - a.length);
+  const out = [];
+  let rest = s;
+  while (rest.length) {
+    const hit = pool.find((v) => rest.startsWith(v));
+    if (!hit) { out.push(rest); break; }
+    out.push(hit);
+    rest = rest.slice(hit.length);
+  }
+  return out.sort();
+}
+// 页面选项:显示 A B C D,平台取值分别是 B A D C(错位)
+// 模型选显示 A、C、D → 平台取值 B、D、C → 页面按 DOM 顺序存 "BDC"
+const labels = ['A', 'B', 'C', 'D'];
+const values = ['B', 'A', 'D', 'C'];
+const orderCases = [
+  [['A', 'C', 'D'], 'BDC', true, '同样三个取值,顺序不同也算一致'],
+  [['A', 'B', 'C', 'D'], 'BDCA', true, '全选,顺序不同也算一致'],
+  [['A', 'B'], 'BA', true, '两个取值'],
+  [['A', 'B'], 'BD', false, '少选了一个,应判不一致'],
+  [['A', 'B'], 'B', false, '只存了一个,应判不一致'],
+];
+for (const [picked, actual, expectOk, desc] of orderCases) {
+  const expectVals = picked.map((L) => examValueOf(labels, values, L)).sort();
+  const actualVals = splitExamValues(actual, values);
+  const ok = (actualVals.join(',') === expectVals.join(',')) === expectOk;
+  console.log(`${ok ? 'PASS' : 'FAIL'} 多选取值集合比较 选=${picked.join('')} 期望=${expectVals.join(',')} 实际=${actual}→${actualVals.join(',')} — ${desc}`);
+  ok ? pass++ : fail++;
+}
+// 判断题取值是多字符("true"/"false"),不能按字符拆
+const jv = ['true', 'false'];
+const jCases = [['true', ['true']], ['false', ['false']], ['truefalse', ['false', 'true']]];
+for (const [raw, expect] of jCases) {
+  const got = splitExamValues(raw, jv);
+  const ok = JSON.stringify(got) === JSON.stringify(expect);
+  console.log(`${ok ? 'PASS' : 'FAIL'} 多字符取值拆分 ${JSON.stringify(raw)} → ${JSON.stringify(got)} (期望 ${JSON.stringify(expect)})`);
+  ok ? pass++ : fail++;
+}
+
 console.log(`\n${pass}/${pass + fail} 通过`);
 process.exit(fail ? 1 : 0);
