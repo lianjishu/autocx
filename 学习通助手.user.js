@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AutoCX 学习通自动看课+LLM答题助手
 // @namespace    autocx
-// @version      1.0.12
+// @version      1.0.13
 // @description  学习通自动看课(视频/文档课件)+LLM辅助章节测验/作业/随堂练习答题,附「AI 作答记录」窗口:请求/思考/回答全程留痕。单文件,基于 Vue 3 + Ant Design Vue + ElementGetter + Ajax-hook。
 // @author       autocx
 // @license      MIT
@@ -68,9 +68,30 @@
     // 视频任务点
     video: {
       player: 'video',
-      popupQuiz: '.xTiTle',                 // 视频中弹题标题
-      popupOption: '.tkList li, .xAnswer li', // 弹题选项(随机选一个即可)
-      popupSubmit: '.btn-submit, .xBtn',    // 弹题提交按钮
+      // 弹题(2026 版结构,来自 ananas/videojs-ext 的模板):
+      //   .ans-timelineobjectsbg  黑色遮罩
+      //   .ans-timelineobjects    容器
+      //   .ans-videoquiz          题目面板
+      //   .ans-videoquiz-title    题型标题(如 "True or false")
+      //   .tkTopic / .tkTopic_con 题干区(可含多道题)
+      //   .tkItem_ul > li         选项(li 内含 span.tkRadio > input[name=ans-videoquiz-opt])
+      //   #videoquiz-submit       提交(选中选项后才显示)
+      //   .ans-videoquiz-continue 继续
+      // 老结构(.xTiTle / .tkList / .xAnswer / .btn-submit)一并留着,兼容旧版课程。
+      popupPanel: '.ans-videoquiz',
+      popupTitle: '.tkTopic_title',
+      popupItem: '.tkTopic_con .tkItem',
+      popupItemTitle: '.tkItem_title',
+      popupOptionList: '.tkItem_ul',
+      popupOption: '.tkItem_ul > li',
+      popupOptionInput: 'input[name=ans-videoquiz-opt], .tkRadio input, .tkCheck input',
+      popupSubmit: '#videoquiz-submit',
+      popupContinue: '.ans-videoquiz-continue, a.continueLearn',
+      popupOverlay: '.ans-timelineobjectsbg',
+      // 老结构兜底
+      popupQuizOld: '.xTiTle',
+      popupOptionOld: '.tkList li, .xAnswer li',
+      popupSubmitOld: '.btn-submit, .xBtn',
       riskVerify: '#riskverify, .riskverify, .yidun', // 风控验证容器(滑块等)
       jobDone: '.ans-job-finished',         // 任务点完成标记
     },
@@ -2605,6 +2626,59 @@
     return hit ? hit.label : '';
   }
 
+  /** 给 Promise 加超时(弹题不能无限等 —— 视频还在等着) */
+  function withTimeout(promise, ms, msg) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(msg || '超时')), ms);
+      promise.then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); reject(e); }
+      );
+    });
+  }
+
+  /**
+   * 平台公共图片(取原图而非缩略图)转成 data URL,供多模态使用。
+   * 图片在 p.cldisk.com,跨域但带 Access-Control-Allow-Origin,可直接 fetch。
+   * 取不到必须 warn —— 取不到图会退化成"纯文本瞎猜",不能悄悄发生。
+   */
+  async function fetchImageDataUrl2(url, module) {
+    try {
+      const r = await fetch(url, { credentials: 'omit' });
+      if (!r.ok) {
+        log.warn(module, `题图读取失败:HTTP ${r.status} ${url}`);
+        return null;
+      }
+      const blob = await r.blob();
+      if (!/^image\//.test(blob.type || '')) {
+        log.warn(module, `题图不是图片(${blob.type}):${url}`);
+        return null;
+      }
+      const durl = await new Promise((resolve) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ''));
+        fr.onerror = () => resolve('');
+        fr.readAsDataURL(blob);
+      });
+      if (!durl) log.warn(module, `题图转 dataURL 失败:${url}`);
+      return durl || null;
+    } catch (e) {
+      log.warn(module, `题图读取异常(${e.message}):${url}`);
+      return null;
+    }
+  }
+
+  /**
+   * 拆选项文字:视频弹题的选项形如 "A、对" / "A. 螺旋形包扎法" / "A 螺旋形"。
+   * 返回 { label, text } —— label 是给模型看的字母,text 是去掉字母前缀后的正文。
+   */
+  function splitVideoQuizOption(text, index) {
+    const t = String(text || '').trim();
+    const m = t.match(/^\s*([A-Ga-g])\s*[、.．)）:：]?\s*/);
+    const label = m ? m[1].toUpperCase() : String.fromCharCode(65 + index);
+    return { label, text: (m ? t.slice(m[0].length) : t).trim() };
+  }
+
   /* ---------- Prompt 构建 ---------- */
   // 解码成功就直接给明文 —— 以前那句"形近乱码请推断"是错误先验,会把模型带进瞎猜。
   function buildPrompt(q) {
@@ -3970,30 +4044,7 @@
      * 图片在 p.cldisk.com,跨域但带 Access-Control-Allow-Origin,可直接 fetch。
      */
     async function fetchImageDataUrl(url) {
-      try {
-        const r = await fetch(url, { credentials: 'omit' });
-        if (!r.ok) {
-          log.warn(module, `题图读取失败:HTTP ${r.status} ${url}`);
-          return null;
-        }
-        const blob = await r.blob();
-        if (!/^image\//.test(blob.type || '')) {
-          log.warn(module, `题图不是图片(${blob.type}):${url}`);
-          return null;
-        }
-        const durl = await new Promise((resolve) => {
-          const fr = new FileReader();
-          fr.onload = () => resolve(String(fr.result || ''));
-          fr.onerror = () => resolve('');
-          fr.readAsDataURL(blob);
-        });
-        if (!durl) log.warn(module, `题图转 dataURL 失败:${url}`);
-        return durl || null;
-      } catch (e) {
-        // 这里必须是 warn 而不是 debug:取不到图会退化成"纯文本瞎猜",不能悄悄发生
-        log.warn(module, `题图读取异常(${e.message}):${url}`);
-        return null;
-      }
+      return fetchImageDataUrl2(url, 'practice');
     }
 
     /**
@@ -4947,27 +4998,28 @@
       }
     }, 2000);
 
-    // ---- 视频中途弹题:随机选一选项提交(答错不阻断播放) ----
-    let popupHandling = false;
-    elmGetter.each(SELECTORS.video.popupQuiz, (el) => {
-      if (popupHandling || done) return;
-      popupHandling = true;
-      log.info(module, '检测到视频弹题,随机作答');
-      setTimeout(() => {
-        try {
-          const $opt = $(SELECTORS.video.popupOption).filter(':visible');
-          if ($opt.length) $opt.get(Math.floor(Math.random() * $opt.length)).click();
-          setTimeout(() => {
-            const $btn = $(SELECTORS.video.popupSubmit).filter(':visible');
-            if ($btn.length) $btn.get(0).click();
-            popupHandling = false;
-          }, 400 + Math.random() * 600);
-        } catch (e) {
-          log.warn(module, '弹题处理异常: ' + e.message);
-          popupHandling = false;
+    // ---- 视频中途弹题:LLM 作答(题干带图就多模态),失败退回随机,保证视频不被卡住 ----
+    // 用队列而不是"正在处理就跳过":一个视频里可能连续弹好几道,
+    // 上一道还在等模型时下一道就弹出来了,直接跳过就等于漏答。
+    const popupQueue = [];
+    let popupBusy = false;
+    const onPopup = (el) => {
+      if (popupQueue.indexOf(el) < 0) popupQueue.push(el);
+      if (popupBusy) return;
+      popupBusy = true;
+      (async () => {
+        while (popupQueue.length) {
+          const panel = popupQueue.shift();
+          try {
+            await handleVideoQuiz(panel);
+          } catch (e) {
+            log.warn(module, '弹题处理异常: ' + e.message);
+          }
         }
-      }, 500 + Math.random() * 800);
-    });
+      })().finally(() => { popupBusy = false; });
+    };
+    elmGetter.each(SELECTORS.video.popupPanel, onPopup);
+    elmGetter.each(SELECTORS.video.popupQuizOld, onPopup);
 
     // ---- 视频元素控制 ----
     elmGetter.get(SELECTORS.video.player, 30000).then((video) => {
@@ -5030,6 +5082,228 @@
       log.error(module, '等待 video 元素超时(30s),页面结构可能已改版');
       report(module, 'error', '未找到 video 元素');
     });
+  }
+
+  /* ---------------------------------------------------------------------
+   * 视频中途弹题:用 LLM 作答(题干带图就多模态)
+   *
+   * 关键取舍 —— **先恢复播放,再答题**:
+   * 平台在弹题出现时会暂停视频,此时"观看时长"不累计。
+   * 如果等 LLM 慢慢想(可能几十秒),这段时间的进度就白丢了;
+   * 而弹题本身**不阻断任务点完成**(把弹题藏掉、继续播,任务点照样算完成)。
+   * 所以顺序是:检测到弹题 → 立刻恢复播放 → 后台问 LLM → 回来点选项 + 提交。
+   * LLM 失败/超时就不作答(视频本来就在播,不影响进度),下一题还会再触发。
+   * ------------------------------------------------------------------- */
+  async function handleVideoQuiz(panel) {
+    const module = 'video';
+    // 排队期间面板可能已经被平台收走了(比如上一题答完它就消失了)
+    if (!panel || !panel.isConnected) return;
+    const video = document.querySelector(SELECTORS.video.player);
+
+    // 1) 先恢复播放:弹题期间平台是暂停的,不恢复就等于白看
+    try { if (video && video.paused) { video.play(); log.info(module, '检测到视频弹题,已恢复播放(不影响观看进度)'); } }
+    catch (e) { log.debug(module, '恢复播放失败: ' + e.message); }
+
+    const items = extractVideoQuizItems(panel);
+    if (!items.length) {
+      log.warn(module, '检测到视频弹题,但没解析出题目结构');
+      return;
+    }
+    log.info(module, `检测到视频弹题,共 ${items.length} 题,交给模型作答`);
+
+    // 2) 走 LLM(带 API Key 才走;没有就退回原来的随机选一个)
+    if (!config.get('llm.api_key')) {
+      log.info(module, '未配置 LLM API Key,弹题改为随机作答');
+      pickVideoQuizRandomly(items);
+      submitVideoQuiz(panel);
+      return;
+    }
+
+    const sid = 'v' + String(video && video.currentSrc || 'video').replace(/[^0-9a-z]/gi, '').slice(-12) + '-' + Date.now().toString(36);
+    const sess = startAiSession({
+      sid,
+      workKey: sid,
+      title: '视频弹题',
+      questions: items.map((it, i) => ({ index: i + 1, type: it.type, stem: it.stem, options: it.options })),
+      source: '视频弹题 DOM',
+      concurrency: 1,
+      submitState: 'off',
+    });
+
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const c = sess.convs[i];
+      try {
+        c.prompt = buildPrompt(it);
+        c.params = {
+          model: sess.aiMeta.model, temperature: 0.1,
+          effort: sess.aiMeta.effort, stream: config.get('llm.stream') !== false,
+        };
+        c.phase = 'requesting';
+        sess.writer(it.index).write(convSnapshot(c), true);
+        // 题干带图(视频截图)时走多模态
+        let st = null;
+        if (it.images && it.images.length && config.get('llm.vision') !== false) {
+          const durl = await fetchImageDataUrl2(it.images[0], module);
+          if (durl) {
+            log.info(module, `弹题第 ${i + 1} 题含图,走多模态作答`);
+            const txt = await withTimeout(llm.vision(c.prompt, durl), 45000, '弹题作答超时');
+            st = { thinking: '', answer: txt, usage: null, streamed: false };
+          }
+        }
+        if (!st) {
+          st = await withTimeout(llm.stream(c.prompt, {
+            onThinking: (t, s) => { c.phase = 'thinking'; c.thinking = s.thinking; sess.writer(it.index).write(convSnapshot(c)); },
+            onAnswer: (t, s) => { c.phase = 'answering'; c.answer = s.answer; sess.writer(it.index).write(convSnapshot(c)); },
+          }).promise, 45000, '弹题作答超时');
+        }
+        c.answer = st.answer; c.thinking = st.thinking;
+        const parsed = parseAnswer(it, st.answer);
+        c.result = { display: parsed.display, normalized: parsed.normalized, letters: parsed.letters || [], ok: parsed.ok };
+        sess.writer(it.index).write(convSnapshot(c), true);
+        if (!parsed.ok) {
+          log.warn(module, `弹题第 ${i + 1} 题回答无法解析(${String(st.answer).slice(0, 40)}),跳过`);
+          c.phase = 'failed';
+          c.error = { message: '回答无法解析成答案', hint: '原始回答: ' + String(st.answer).slice(0, 80) };
+          sess.writer(it.index).write(convSnapshot(c), true);
+          continue;
+        }
+        const picked = pickVideoQuizOption(it, parsed);
+        if (!picked) {
+          log.warn(module, `弹题第 ${i + 1} 题找不到对应选项(${parsed.normalized}),跳过`);
+          continue;
+        }
+        log.info(module, `弹题第 ${i + 1} 题作答:${parsed.display} → ${picked.text.slice(0, 40)}`);
+        c.result.fillOk = true;
+        sess.writer(it.index).write(convSnapshot(c), true);
+      } catch (e) {
+        log.warn(module, `弹题第 ${i + 1} 题调用失败:${e.message}`);
+        c.phase = 'failed';
+        c.error = { message: e.message, hint: '该题未作答,不影响视频进度' };
+        sess.writer(it.index).write(convSnapshot(c), true);
+      }
+    }
+
+    submitVideoQuiz(panel);
+    sess.aiMeta.answered = sess.convs.filter((x) => x.result && x.result.fillOk).length;
+    sess.metaWrite();
+
+    // 3) 交卷/答完后平台会显示"继续",视频可能仍处于暂停 —— 再恢复一次
+    try {
+      const cont = panel.querySelector(SELECTORS.video.popupContinue) || document.querySelector(SELECTORS.video.popupContinue);
+      if (cont && cont.offsetParent !== null) cont.click();
+    } catch (e) { /* 忽略 */ }
+    try { if (video && video.paused) video.play(); } catch (e) { /* 忽略 */ }
+  }
+
+  /** 从弹题面板里解析出每道题:题干 / 选项 / 类型 */
+  function extractVideoQuizItems(panel) {
+    const root = panel.querySelector(SELECTORS.video.popupItem) ? panel : document;
+    let nodes = Array.prototype.slice.call(root.querySelectorAll(SELECTORS.video.popupItem));
+    // 没有 .tkItem 结构时,退回"整个面板就是一道题"
+    if (!nodes.length) {
+      const optList = panel.querySelector(SELECTORS.video.popupOptionList);
+      if (!optList) return [];
+      nodes = [optList.parentElement || panel];
+    }
+    // 面板标题(如 "True or false")说明题型,一并带给模型
+    const titleEl = panel.querySelector(SELECTORS.video.popupTitle);
+    const panelTitle = titleEl ? htmlToText(titleEl.textContent || '').trim() : '';
+    const out = [];
+    nodes.forEach((node) => {
+      const optList = node.querySelector(SELECTORS.video.popupOptionList);
+      const optEls = optList
+        ? Array.prototype.slice.call(optList.querySelectorAll(SELECTORS.video.popupOption))
+        : Array.prototype.slice.call(node.querySelectorAll(SELECTORS.video.popupOptionOld));
+      if (!optEls.length) return;
+      const options = optEls.map((el, k) => {
+        const input = el.querySelector(SELECTORS.video.popupOptionInput);
+        const parsed = splitVideoQuizOption(htmlToText(el.textContent || ''), k);
+        return { el, input, label: parsed.label, text: parsed.text };
+      });
+      // 题干:优先 .tkItem_title;否则取选项列表之前的文字
+      let stem = '';
+      const titleEl2 = node.querySelector(SELECTORS.video.popupItemTitle);
+      if (titleEl2) stem = htmlToText(titleEl2.textContent || '').trim();
+      if (!stem && optList) {
+        const clone = optList.parentElement ? optList.parentElement.cloneNode(true) : null;
+        if (clone) {
+          Array.prototype.slice.call(clone.querySelectorAll(SELECTORS.video.popupOptionList))
+            .forEach((n) => n.remove());
+          stem = htmlToText(clone.textContent || '').trim();
+        }
+      }
+      // 题型:看输入框是 radio(单选/判断)还是 checkbox(多选);
+      // 两个选项的 radio 判为判断题,题干里通常写着 True/False。
+      const isCheckbox = options.some((o) => o.input && String(o.input.type).toLowerCase() === 'checkbox');
+      let type = 'single';
+      if (isCheckbox) type = 'multi';
+      else if (options.length === 2) type = 'judge';
+      out.push({
+        index: out.length + 1,
+        type,
+        stem: panelTitle ? `${panelTitle}｜${stem}` : stem,
+        options: options.map((o) => ({ label: o.label, text: o.text })),
+        dom: node,
+        optEls: options.map((o) => o.el),
+        optLabels: options.map((o) => o.label),
+        images: collectVideoQuizImages(node),
+      });
+    });
+    return out;
+  }
+
+  /** 题干里的图片(视频弹题里可能是视频截图) */
+  function collectVideoQuizImages(node) {
+    const out = [];
+    Array.prototype.slice.call(node.querySelectorAll('img')).forEach((im) => {
+      const u = im.getAttribute('data-orignal') || im.getAttribute('src') || '';
+      if (u && /^https?:/i.test(u) && out.indexOf(u) < 0 && out.length < 3) out.push(u);
+    });
+    return out;
+  }
+
+  /** 点中模型选的那一项 */
+  function pickVideoQuizOption(it, parsed) {
+    const want = (parsed.letters || [])[0];
+    if (!want) return null;
+    const idx = it.optLabels.findIndex((L) => L === want);
+    if (idx < 0) return null;
+    const opt = it.optEls[idx];
+    try {
+      if (opt.querySelector(SELECTORS.video.popupOptionInput)) {
+        const input = opt.querySelector(SELECTORS.video.popupOptionInput);
+        if (!input.checked) input.click();
+      } else {
+        opt.click();
+      }
+      return { el: opt, text: (it.options[idx] || {}).text || '' };
+    } catch (e) {
+      log.debug('video', '点击选项失败: ' + e.message);
+      return null;
+    }
+  }
+
+  /** 退回随机作答(没配 API Key 时) */
+  function pickVideoQuizRandomly(items) {
+    items.forEach((it) => {
+      if (!it.optEls.length) return;
+      const el = it.optEls[Math.floor(Math.random() * it.optEls.length)];
+      try {
+        const input = el.querySelector(SELECTORS.video.popupOptionInput);
+        if (input) { if (!input.checked) input.click(); } else el.click();
+      } catch (e) { /* 忽略 */ }
+    });
+  }
+
+  /** 提交弹题(平台在选中选项后才会显示提交按钮) */
+  function submitVideoQuiz(panel) {
+    const btn = panel.querySelector(SELECTORS.video.popupSubmit)
+      || document.querySelector(SELECTORS.video.popupSubmit);
+    if (!btn) return;
+    if (btn.style && btn.style.display === 'none') return;   // 还没选完,平台不让提交
+    try { btn.click(); log.info('video', '已提交视频弹题'); }
+    catch (e) { log.debug('video', '提交弹题失败: ' + e.message); }
   }
 
   // 顶层帧注册菜单:任意时候都能打开作答记录(单独打开答卷页时也没有别的入口)
